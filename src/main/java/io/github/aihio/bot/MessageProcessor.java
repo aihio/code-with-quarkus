@@ -3,6 +3,8 @@ package io.github.aihio.bot;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.camel.builder.RouteBuilder;
+import org.apache.camel.component.telegram.TelegramConstants;
+import org.apache.camel.component.telegram.model.IncomingMessage;
 
 @ApplicationScoped
 public class MessageProcessor extends RouteBuilder {
@@ -19,7 +21,12 @@ public class MessageProcessor extends RouteBuilder {
     @Override
     public void configure() {
         from("telegram:bots")
-                .bean(telegramMessageHandler, "handle")
+                .process(exchange -> {
+                    var incomingMessage = exchange.getIn().getBody(IncomingMessage.class);
+                    var chatId = exchange.getIn().getHeader(TelegramConstants.TELEGRAM_CHAT_ID, String.class);
+                    var response = telegramMessageHandler.handle(incomingMessage, chatId);
+                    exchange.getIn().setBody(response);
+                })
                 .filter(body().isNotNull())
                 .to(TELEGRAM_PRODUCER_URI);
     }
