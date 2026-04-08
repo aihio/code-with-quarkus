@@ -1,8 +1,15 @@
 # code-with-quarkus
 
-This project uses Quarkus, the Supersonic Subatomic Java Framework.
+This project is a Quarkus-based Telegram bot that accepts TikTok URLs, downloads the video, and sends it back to the
+user.
 
-If you want to learn more about Quarkus, please visit its website: <https://quarkus.io/>.
+## Required environment variables
+
+The project is safe to publish publicly as long as secrets are supplied only through environment variables.
+
+Required:
+
+- `TELEGRAM_TOKEN` - Telegram bot token
 
 ## Running the application in dev mode
 
@@ -55,13 +62,5 @@ If you want to learn more about building native executables, please consult <htt
 
 ## Related Guides
 
-- REST ([guide](https://quarkus.io/guides/rest)): A Jakarta REST implementation utilizing build time processing and Vert.x. This extension is not compatible with the quarkus-resteasy extension, or any of the extensions that depend on it.
 - Camel Telegram ([guide](https://camel.apache.org/camel-quarkus/latest/reference/extensions/telegram.html)): Send and receive messages using the Telegram Bot API
 
-## Provided Code
-
-### REST
-
-Easily start your REST Web Services
-
-[Related guide section...](https://quarkus.io/guides/getting-started-reactive#reactive-jax-rs-resources)

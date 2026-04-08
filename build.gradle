@@ -5,17 +5,16 @@ plugins {
 
 repositories {
     mavenCentral()
-    mavenLocal()
 }
 
 dependencies {
     implementation enforcedPlatform("${quarkusPlatformGroupId}:${quarkusPlatformArtifactId}:${quarkusPlatformVersion}")
     implementation enforcedPlatform("${quarkusPlatformGroupId}:quarkus-camel-bom:${quarkusPlatformVersion}")
-    implementation 'io.quarkus:quarkus-rest'
+    implementation 'org.apache.camel.quarkus:camel-quarkus-bean'
+    implementation 'io.quarkus:quarkus-jackson'
     implementation 'org.apache.camel.quarkus:camel-quarkus-telegram'
     implementation 'io.quarkus:quarkus-arc'
     testImplementation 'io.quarkus:quarkus-junit'
-    testImplementation 'io.rest-assured:rest-assured'
 }
 
 group = 'io.github.aihio'
