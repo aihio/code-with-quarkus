@@ -1,8 +1,12 @@
 package io.github.aihio.bot;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.aihio.bot.tiktok.TikTokDownloader;
+import org.apache.camel.component.telegram.TelegramConstants;
 import org.apache.camel.component.telegram.model.IncomingMessage;
 import org.apache.camel.component.telegram.model.User;
+import org.apache.camel.impl.DefaultCamelContext;
+import org.apache.camel.support.DefaultExchange;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -25,7 +29,7 @@ class TelegramMessageHandlerTest {
         var sender = new StubTelegramVideoSender();
         var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
 
-        var reply = handler.handle(incomingMessage("/start", "Username", "FirstName"), "123");
+        var reply = handler.handle(incomingMessage("/start"), "123");
 
         assertEquals("Hi, Username! Paste a TikTok link and I will download it for you.", ((org.apache.camel.component.telegram.model.OutgoingTextMessage) reply).getText());
         assertNull(downloader.lastUrl);
@@ -37,7 +41,7 @@ class TelegramMessageHandlerTest {
         var handler = new TelegramMessageHandler(new StubTikTokDownloader(), defaultMessageHandler,
                 new StubTelegramVideoSender(), startCommandMessageHandler);
 
-        var reply = handler.handle(incomingMessage("hello", "Username", "FirstName"), "123");
+        var reply = handler.handle(incomingMessage("hello"), "123");
 
         assertEquals("hello", ((org.apache.camel.component.telegram.model.OutgoingTextMessage) reply).getText());
     }
@@ -47,7 +51,7 @@ class TelegramMessageHandlerTest {
         var handler = new TelegramMessageHandler(new StubTikTokDownloader(), defaultMessageHandler,
                 new StubTelegramVideoSender(), startCommandMessageHandler);
 
-        var reply = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123", "Username", "FirstName"), " ");
+        var reply = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), " ");
 
         assertEquals("Unable to detect Telegram chat id for this message.",
                 ((org.apache.camel.component.telegram.model.OutgoingTextMessage) reply).getText());
@@ -66,7 +70,7 @@ class TelegramMessageHandlerTest {
         sender.progressMessageId = 77L;
         var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
 
-        var result = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123", "Username", "FirstName"), "123");
+        var result = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), "123");
 
         assertNull(result);
         assertEquals("https://www.tiktok.com/@demo/video/123", downloader.lastUrl);
@@ -98,7 +102,7 @@ class TelegramMessageHandlerTest {
         var sender = new StubTelegramVideoSender();
         var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
 
-        var result = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123", "Username", "FirstName"), "123");
+        var result = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), "123");
 
         assertNull(result);
         assertEquals(1, sender.sendMediaGroupCalls);
@@ -125,7 +129,7 @@ class TelegramMessageHandlerTest {
         sender.sendAudioFailure = new TikTokDownloader.TikTokDownloadException("audio send failed");
         var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
 
-        var reply = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123", "Username", "FirstName"), "123");
+        var reply = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), "123");
 
         assertEquals("Failed to process this TikTok link. Please try another link.",
                 ((org.apache.camel.component.telegram.model.OutgoingTextMessage) reply).getText());
@@ -134,12 +138,46 @@ class TelegramMessageHandlerTest {
         assertTrue(Files.notExists(audioPath));
     }
 
-    private IncomingMessage incomingMessage(String text, String username, String firstName) {
+    @Test
+    void routeOwnedCleanupDeletesFilesWhenSendMediaGroupFails() throws IOException {
+        var photoOne = Files.createTempFile("telegram-handler-route-fail-", ".jpg");
+        var photoTwo = Files.createTempFile("telegram-handler-route-fail-", ".jpg");
+        var audioPath = Files.createTempFile("telegram-handler-route-fail-", ".mp3");
+        Files.writeString(photoOne, "photo-1");
+        Files.writeString(photoTwo, "photo-2");
+        Files.writeString(audioPath, "audio-content");
+
+        var downloader = new StubTikTokDownloader();
+        downloader.downloadResult = new TikTokDownloader.DownloadedMedia(null, java.util.List.of(photoOne, photoTwo), audioPath);
+        var sender = new StubTelegramVideoSender();
+        sender.sendMediaGroupFailure = new TikTokDownloader.TikTokDownloadException("media group send failed");
+        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
+        var processor = new MessageProcessor(handler, defaultMessageHandler, sender);
+
+        var exchange = new DefaultExchange(new DefaultCamelContext());
+        exchange.getIn().setHeader(TelegramConstants.TELEGRAM_CHAT_ID, "123");
+
+        assertThrows(TikTokDownloader.TikTokDownloadException.class,
+                () -> handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), "123", exchange));
+
+        assertTrue(Files.exists(photoOne));
+        assertTrue(Files.exists(photoTwo));
+        assertTrue(Files.exists(audioPath));
+
+        processor.cleanupExchangeArtifacts(exchange);
+
+        assertTrue(Files.notExists(photoOne));
+        assertTrue(Files.notExists(photoTwo));
+        assertTrue(Files.notExists(audioPath));
+        assertEquals(1, sender.deleteCalls);
+    }
+
+    private IncomingMessage incomingMessage(String text) {
         var incomingMessage = new IncomingMessage();
         incomingMessage.setText(text);
         var user = new User();
-        user.setUsername(username);
-        user.setFirstName(firstName);
+        user.setUsername("Username");
+        user.setFirstName("FirstName");
         incomingMessage.setFrom(user);
         return incomingMessage;
     }
@@ -173,7 +211,6 @@ class TelegramMessageHandlerTest {
         private String lastAudioFileName;
         private java.util.List<Path> lastMediaGroupPaths;
         private Long deletedMessageId;
-        private RuntimeException sendVideoFailure;
         private RuntimeException sendAudioFailure;
         private RuntimeException sendMediaGroupFailure;
         private int sendVideoCalls;
@@ -202,9 +239,6 @@ class TelegramMessageHandlerTest {
         @Override
         public void sendVideo(String chatId, Path videoPath, String fileName) {
             sendVideoCalls++;
-            if (sendVideoFailure != null) {
-                throw sendVideoFailure;
-            }
             lastChatId = chatId;
             lastVideoPath = videoPath;
             lastFileName = fileName;

@@ -1,5 +1,6 @@
 package io.github.aihio.bot;
 
+import io.github.aihio.bot.tiktok.TikTokDownloaderRuntimeConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Produces;
 

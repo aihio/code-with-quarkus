@@ -1,4 +1,4 @@
-package io.github.aihio.bot;
+package io.github.aihio.bot.tiktok;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -1135,4 +1135,5 @@ class TikTokDownloaderTest {
         }
     }
 }
+
 

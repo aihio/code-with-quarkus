@@ -1,5 +1,6 @@
 package io.github.aihio.bot;
 
+import io.github.aihio.bot.tiktok.TikTokDownloaderRuntimeConfig;
 import org.junit.jupiter.api.Test;
 
 import java.net.CookieHandler;

@@ -1,6 +1,7 @@
 package io.github.aihio.bot;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.aihio.bot.tiktok.TikTokDownloader;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -22,17 +23,23 @@ public class TelegramVideoSender {
 
     private static final int TELEGRAM_MEDIA_GROUP_MAX = 10;
 
-    private final String telegramToken;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
+    private final URI telegramApiBaseUri;
 
     @Inject
     public TelegramVideoSender(@ConfigProperty(name = "camel.component.telegram.authorization-token") String telegramToken,
                                ObjectMapper objectMapper,
                                HttpClient httpClient) {
-        this.telegramToken = telegramToken;
+        this(objectMapper, httpClient, URI.create("https://api.telegram.org/bot" + telegramToken + "/"));
+    }
+
+    TelegramVideoSender(ObjectMapper objectMapper,
+                        HttpClient httpClient,
+                        URI telegramApiBaseUri) {
         this.objectMapper = objectMapper;
         this.httpClient = httpClient;
+        this.telegramApiBaseUri = telegramApiBaseUri;
     }
 
     public Long sendTextMessage(String chatId, String text) {
@@ -59,22 +66,18 @@ public class TelegramVideoSender {
     }
 
     public void sendVideo(String chatId, Path videoPath, String fileName) {
-        var boundary = newBoundary();
-        var uri = URI.create("https://api.telegram.org/bot" + telegramToken + "/sendVideo");
-        var parts = new ArrayList<byte[]>();
-        parts.add(formField(boundary, "chat_id", chatId));
-        parts.add(formField(boundary, "supports_streaming", "true"));
-
-        sendMultipartRequest("sendVideo", uri, boundary,
-                multipartBody(boundary, parts, List.of(filePart(boundary, "video", fileName, "video/mp4", videoPath))));
+        uploadMultipart("sendVideo", List.of(
+                new FieldPart("chat_id", chatId),
+                new FieldPart("supports_streaming", "true"),
+                new FilePart("video", fileName, "video/mp4", videoPath)
+        ));
     }
 
     public void sendAudio(String chatId, Path audioPath, String fileName) {
-        var boundary = newBoundary();
-        var uri = URI.create("https://api.telegram.org/bot" + telegramToken + "/sendAudio");
-        var parts = List.of(formField(boundary, "chat_id", chatId));
-        sendMultipartRequest("sendAudio", uri, boundary,
-                multipartBody(boundary, parts, List.of(filePart(boundary, "audio", fileName, "audio/mpeg", audioPath))));
+        uploadMultipart("sendAudio", List.of(
+                new FieldPart("chat_id", chatId),
+                new FilePart("audio", fileName, "audio/mpeg", audioPath)
+        ));
     }
 
     public void sendMediaGroup(String chatId, List<Path> photoPaths) {
@@ -95,36 +98,30 @@ public class TelegramVideoSender {
     }
 
     private void sendMediaGroupChunk(String chatId, List<Path> photoPaths) {
-        var boundary = newBoundary();
-        var uri = URI.create("https://api.telegram.org/bot" + telegramToken + "/sendMediaGroup");
         var media = new ArrayList<Map<String, String>>();
-        var files = new ArrayList<FilePart>();
+        var parts = new ArrayList<MultipartPart>();
+        parts.add(new FieldPart("chat_id", chatId));
 
         for (var index = 0; index < photoPaths.size(); index++) {
             var photoPath = photoPaths.get(index);
             var attachName = "photo" + index;
             media.add(Map.of("type", "photo", "media", "attach://" + attachName));
-            files.add(filePart(boundary, attachName, photoPath.getFileName().toString(), contentTypeFor(photoPath), photoPath));
+            parts.add(new FilePart(attachName, photoPath.getFileName().toString(), contentTypeFor(photoPath), photoPath));
         }
 
         try {
-            var mediaJson = objectMapper.writeValueAsString(media);
-            var parts = List.of(
-                    formField(boundary, "chat_id", chatId),
-                    formField(boundary, "media", mediaJson)
-            );
-            sendMultipartRequest("sendMediaGroup", uri, boundary, multipartBody(boundary, parts, files));
+            parts.add(1, new FieldPart("media", objectMapper.writeValueAsString(media)));
+            uploadMultipart("sendMediaGroup", parts);
         } catch (IOException e) {
             throw new TikTokDownloader.TikTokDownloadException("Telegram sendMediaGroup failed: " + e.getMessage(), e);
         }
     }
 
     private void sendPhoto(String chatId, Path photoPath, String fileName) {
-        var boundary = newBoundary();
-        var uri = URI.create("https://api.telegram.org/bot" + telegramToken + "/sendPhoto");
-        var parts = List.of(formField(boundary, "chat_id", chatId));
-        sendMultipartRequest("sendPhoto", uri, boundary,
-                multipartBody(boundary, parts, List.of(filePart(boundary, "photo", fileName, contentTypeFor(photoPath), photoPath))));
+        uploadMultipart("sendPhoto", List.of(
+                new FieldPart("chat_id", chatId),
+                new FilePart("photo", fileName, contentTypeFor(photoPath), photoPath)
+        ));
     }
 
     private String contentTypeFor(Path path) {
@@ -140,32 +137,28 @@ public class TelegramVideoSender {
 
     private com.fasterxml.jackson.databind.JsonNode postJson(String method, Map<String, ?> payload) {
         try {
-            var uri = URI.create("https://api.telegram.org/bot" + telegramToken + "/" + method);
             var requestBody = objectMapper.writeValueAsString(payload);
-            var request = HttpRequest.newBuilder(uri)
+            var request = HttpRequest.newBuilder(methodUri(method))
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(requestBody, StandardCharsets.UTF_8))
                     .build();
-
-            var response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new TikTokDownloader.TikTokDownloadException(
-                        "Telegram " + method + " failed: HTTP " + response.statusCode() + " - " + response.body());
-            }
-            return objectMapper.readTree(response.body());
+            return sendTelegramRequest(method, request);
         } catch (IOException e) {
             throw new TikTokDownloader.TikTokDownloadException("Telegram " + method + " failed: " + e.getMessage(), e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new TikTokDownloader.TikTokDownloadException("Telegram " + method + " interrupted", e);
         }
     }
 
-    private void sendMultipartRequest(String method, URI uri, String boundary, HttpRequest.BodyPublisher bodyPublisher) {
-        var request = HttpRequest.newBuilder(uri)
+    private void uploadMultipart(String method, List<MultipartPart> requestParts) {
+        var boundary = newBoundary();
+        var request = HttpRequest.newBuilder(methodUri(method))
                 .header("Content-Type", "multipart/form-data; boundary=" + boundary)
-                .POST(bodyPublisher)
+                .POST(multipartBody(boundary, requestParts))
                 .build();
+
+        sendTelegramRequest(method, request);
+    }
+
+    private com.fasterxml.jackson.databind.JsonNode sendTelegramRequest(String method, HttpRequest request) {
 
         try {
             var response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
@@ -179,6 +172,7 @@ public class TelegramVideoSender {
                 throw new TikTokDownloader.TikTokDownloadException(
                         "Telegram " + method + " rejected request: " + response.body());
             }
+            return json;
         } catch (IOException e) {
             throw new TikTokDownloader.TikTokDownloadException("Telegram " + method + " failed: " + e.getMessage(), e);
         } catch (InterruptedException e) {
@@ -187,46 +181,53 @@ public class TelegramVideoSender {
         }
     }
 
-    private HttpRequest.BodyPublisher multipartBody(String boundary, List<byte[]> fields, List<FilePart> files) {
-        var parts = new ArrayList<HttpRequest.BodyPublisher>();
-        for (var field : fields) {
-            parts.add(HttpRequest.BodyPublishers.ofByteArray(field));
-        }
-        for (var file : files) {
-            parts.add(HttpRequest.BodyPublishers.ofByteArray(file.header().getBytes(StandardCharsets.UTF_8)));
-            try {
-                parts.add(HttpRequest.BodyPublishers.ofFile(file.path()));
-            } catch (IOException e) {
-                throw new TikTokDownloader.TikTokDownloadException("Telegram upload failed: cannot read downloaded file", e);
+    private HttpRequest.BodyPublisher multipartBody(String boundary, List<MultipartPart> requestParts) {
+        var publishers = new ArrayList<HttpRequest.BodyPublisher>();
+        for (var part : requestParts) {
+            if (part instanceof FieldPart fieldPart) {
+                publishers.add(HttpRequest.BodyPublishers.ofString(fieldPart.header(boundary), StandardCharsets.UTF_8));
+                continue;
             }
-            parts.add(HttpRequest.BodyPublishers.ofByteArray("\r\n".getBytes(StandardCharsets.UTF_8)));
+
+            if (part instanceof FilePart filePart) {
+                publishers.add(HttpRequest.BodyPublishers.ofString(filePart.header(boundary), StandardCharsets.UTF_8));
+                try {
+                    publishers.add(HttpRequest.BodyPublishers.ofFile(filePart.path()));
+                } catch (IOException e) {
+                    throw new TikTokDownloader.TikTokDownloadException("Telegram upload failed: cannot read downloaded file", e);
+                }
+                publishers.add(HttpRequest.BodyPublishers.ofString("\r\n", StandardCharsets.UTF_8));
+            }
         }
 
-        var closing = "--" + boundary + "--\r\n";
-        parts.add(HttpRequest.BodyPublishers.ofByteArray(closing.getBytes(StandardCharsets.UTF_8)));
-        return HttpRequest.BodyPublishers.concat(parts.toArray(HttpRequest.BodyPublisher[]::new));
-    }
-
-    private byte[] formField(String boundary, String name, String value) {
-        var separator = "--" + boundary + "\r\n";
-        var field = separator
-                + "Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n"
-                + value + "\r\n";
-        return field.getBytes(StandardCharsets.UTF_8);
-    }
-
-    private FilePart filePart(String boundary, String fieldName, String fileName, String contentType, Path path) {
-        var separator = "--" + boundary + "\r\n";
-        var header = separator
-                + "Content-Disposition: form-data; name=\"" + fieldName + "\"; filename=\"" + fileName + "\"\r\n"
-                + "Content-Type: " + contentType + "\r\n\r\n";
-        return new FilePart(header, path);
+        publishers.add(HttpRequest.BodyPublishers.ofString("--" + boundary + "--\r\n", StandardCharsets.UTF_8));
+        return HttpRequest.BodyPublishers.concat(publishers.toArray(HttpRequest.BodyPublisher[]::new));
     }
 
     private String newBoundary() {
         return "----tiktokbot-" + UUID.randomUUID().toString().replace("-", "");
     }
 
-    private record FilePart(String header, Path path) {
+    private URI methodUri(String method) {
+        return telegramApiBaseUri.resolve(method);
+    }
+
+    private sealed interface MultipartPart permits FieldPart, FilePart {
+    }
+
+    private record FieldPart(String name, String value) implements MultipartPart {
+        private String header(String boundary) {
+            return "--" + boundary + "\r\n"
+                    + "Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n"
+                    + value + "\r\n";
+        }
+    }
+
+    private record FilePart(String name, String fileName, String contentType, Path path) implements MultipartPart {
+        private String header(String boundary) {
+            return "--" + boundary + "\r\n"
+                    + "Content-Disposition: form-data; name=\"" + name + "\"; filename=\"" + fileName + "\"\r\n"
+                    + "Content-Type: " + contentType + "\r\n\r\n";
+        }
     }
 }

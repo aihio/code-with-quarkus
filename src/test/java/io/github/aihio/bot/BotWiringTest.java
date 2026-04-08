@@ -1,5 +1,6 @@
 package io.github.aihio.bot;
 
+import io.github.aihio.bot.tiktok.TikTokDownloaderRuntimeConfig;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.apache.camel.CamelContext;

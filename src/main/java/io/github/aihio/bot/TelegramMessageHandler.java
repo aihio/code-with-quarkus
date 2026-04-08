@@ -1,8 +1,10 @@
 package io.github.aihio.bot;
 
+import io.github.aihio.bot.tiktok.TikTokDownloader;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.camel.Body;
+import org.apache.camel.Exchange;
 import org.apache.camel.Header;
 import org.apache.camel.component.telegram.TelegramConstants;
 import org.apache.camel.component.telegram.model.IncomingMessage;
@@ -13,9 +15,13 @@ import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.List;
 
 @ApplicationScoped
 public class TelegramMessageHandler {
+
+    public static final String EX_PROP_TEMP_PATHS = "telegram.temp.paths";
+    public static final String EX_PROP_PROGRESS_MESSAGE_ID = "telegram.progress.message.id";
 
     private final TikTokDownloader tiktokDownloader;
     private final DefaultMessageHandler defaultMessageHandler;
@@ -35,52 +41,73 @@ public class TelegramMessageHandler {
 
     public Object handle(@Body IncomingMessage incomingMessage,
                          @Header(TelegramConstants.TELEGRAM_CHAT_ID) String chatId) {
+        return handle(incomingMessage, chatId, null);
+    }
+
+    public Object handle(@Body IncomingMessage incomingMessage,
+                         @Header(TelegramConstants.TELEGRAM_CHAT_ID) String chatId,
+                         Exchange exchange) {
         var incoming = incomingMessage == null ? null : incomingMessage.getText();
         if (isStartCommand(incoming)) {
             return startCommandMessageHandler.handle(incomingMessage);
         }
+        var validationResponse = validateTikTokInput(incoming, chatId);
+        if (validationResponse != null) {
+            return validationResponse;
+        }
+
+        var progressMessageId = sendProgressIndicator(chatId);
+        rememberProgressMessage(exchange, progressMessageId);
+        var downloadedPaths = List.<Path>of();
+        try {
+            var media = tiktokDownloader.downloadMedia(incoming);
+            downloadedPaths = collectDownloadedPaths(media);
+            rememberDownloadedPaths(exchange, downloadedPaths);
+            sendPrimaryMedia(chatId, media);
+            sendAudio(chatId, media.audioPath());
+            // Media was already sent directly, so skip producer route output for this exchange.
+            return null;
+        } catch (TikTokDownloader.TikTokDownloadException e) {
+            if (exchange != null) {
+                throw e;
+            }
+            return defaultMessageHandler.handle("Failed to process this TikTok link. Please try another link.");
+        } finally {
+            if (exchange == null) {
+                cleanupDownloadedPaths(downloadedPaths);
+                telegramVideoSender.deleteMessage(chatId, progressMessageId);
+            }
+        }
+    }
+
+    private Object validateTikTokInput(String incoming, String chatId) {
         if (!isValidTikTokUrl(incoming)) {
             return defaultMessageHandler.handle(incoming);
         }
         if (chatId == null || chatId.isBlank()) {
             return defaultMessageHandler.handle("Unable to detect Telegram chat id for this message.");
         }
+        return null;
+    }
 
-        var progressMessageId = sendProgressIndicator(chatId);
-        var downloadedPaths = new ArrayList<Path>();
-        try {
-            var media = tiktokDownloader.downloadMedia(incoming);
-            downloadedPaths = collectDownloadedPaths(media);
-            if (media.gallery()) {
-                telegramVideoSender.sendMediaGroup(chatId, media.photoPaths());
-            } else {
-                var videoPath = media.videoPath();
-                if (videoPath == null) {
-                    throw new TikTokDownloader.TikTokDownloadException("Extraction failure: TikTok post has no playable media");
-                }
-                var fileName = videoPath.getFileName().toString();
-                telegramVideoSender.sendVideo(chatId, videoPath, fileName);
-            }
-
-            var audioPath = media.audioPath();
-            if (audioPath == null) {
-                throw new TikTokDownloader.TikTokDownloadException("Extraction failure: TikTok post has no audio track");
-            }
-            telegramVideoSender.sendAudio(chatId, audioPath, audioPath.getFileName().toString());
-            // Media was already sent directly, so skip producer route output for this exchange.
-            return null;
-        } catch (RuntimeException e) {
-            return defaultMessageHandler.handle("Failed to process this TikTok link. Please try another link.");
-        } finally {
-            for (var path : downloadedPaths) {
-                try {
-                    Files.deleteIfExists(path);
-                } catch (IOException ignored) {
-                    // ignore cleanup failure for temporary download artifacts
-                }
-            }
-            telegramVideoSender.deleteMessage(chatId, progressMessageId);
+    private void sendPrimaryMedia(String chatId, TikTokDownloader.DownloadedMedia media) {
+        if (media.gallery()) {
+            telegramVideoSender.sendMediaGroup(chatId, media.photoPaths());
+            return;
         }
+
+        var videoPath = media.videoPath();
+        if (videoPath == null) {
+            throw new TikTokDownloader.TikTokDownloadException("Extraction failure: TikTok post has no playable media");
+        }
+        telegramVideoSender.sendVideo(chatId, videoPath, videoPath.getFileName().toString());
+    }
+
+    private void sendAudio(String chatId, Path audioPath) {
+        if (audioPath == null) {
+            throw new TikTokDownloader.TikTokDownloadException("Extraction failure: TikTok post has no audio track");
+        }
+        telegramVideoSender.sendAudio(chatId, audioPath, audioPath.getFileName().toString());
     }
 
     private Long sendProgressIndicator(String chatId) {
@@ -97,6 +124,30 @@ public class TelegramMessageHandler {
             paths.add(media.audioPath());
         }
         return paths;
+    }
+
+    private void rememberDownloadedPaths(Exchange exchange, List<Path> downloadedPaths) {
+        if (exchange == null) {
+            return;
+        }
+        exchange.setProperty(EX_PROP_TEMP_PATHS, List.copyOf(downloadedPaths));
+    }
+
+    private void rememberProgressMessage(Exchange exchange, Long progressMessageId) {
+        if (exchange == null) {
+            return;
+        }
+        exchange.setProperty(EX_PROP_PROGRESS_MESSAGE_ID, progressMessageId);
+    }
+
+    private void cleanupDownloadedPaths(List<Path> downloadedPaths) {
+        for (var path : downloadedPaths) {
+            try {
+                Files.deleteIfExists(path);
+            } catch (IOException ignored) {
+                // ignore cleanup failure for temporary download artifacts
+            }
+        }
     }
 
     private boolean isStartCommand(String incoming) {
