@@ -54,12 +54,14 @@ class TelegramMessageHandlerTest {
     }
 
     @Test
-    void sendsProgressAndVideoAndDeletesProgressMessage() throws IOException {
+    void sendsProgressVideoAndAudioAndDeletesProgressMessage() throws IOException {
         var videoPath = Files.createTempFile("telegram-handler-", ".mp4");
         Files.writeString(videoPath, "video-content");
+        var audioPath = Files.createTempFile("telegram-handler-", ".mp3");
+        Files.writeString(audioPath, "audio-content");
 
         var downloader = new StubTikTokDownloader();
-        downloader.downloadResult = videoPath;
+        downloader.downloadResult = new TikTokDownloader.DownloadedMedia(videoPath, java.util.List.of(), audioPath);
         var sender = new StubTelegramVideoSender();
         sender.progressMessageId = 77L;
         var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
@@ -73,28 +75,63 @@ class TelegramMessageHandlerTest {
         assertEquals("123", sender.lastChatId);
         assertEquals(videoPath.getFileName().toString(), sender.lastFileName);
         assertEquals(videoPath, sender.lastVideoPath);
+        assertEquals(audioPath, sender.lastAudioPath);
+        assertEquals(audioPath.getFileName().toString(), sender.lastAudioFileName);
+        assertEquals(1, sender.sendAudioCalls);
         assertEquals(1, sender.deleteCalls);
         assertEquals(77L, sender.deletedMessageId);
         assertTrue(Files.notExists(videoPath));
+        assertTrue(Files.notExists(audioPath));
     }
 
     @Test
-    void deletesTempFileAndKeepsProgressMessageWhenVideoSendFails() throws IOException {
-        var videoPath = Files.createTempFile("telegram-handler-fail-", ".mp4");
-        Files.writeString(videoPath, "video-content");
+    void sendsGalleryAsMediaGroupAndAudioAndDeletesProgressMessage() throws IOException {
+        var photoOne = Files.createTempFile("telegram-handler-gallery-", ".jpg");
+        var photoTwo = Files.createTempFile("telegram-handler-gallery-", ".jpg");
+        var audioPath = Files.createTempFile("telegram-handler-gallery-", ".mp3");
+        Files.writeString(photoOne, "photo-1");
+        Files.writeString(photoTwo, "photo-2");
+        Files.writeString(audioPath, "audio-content");
 
         var downloader = new StubTikTokDownloader();
-        downloader.downloadResult = videoPath;
+        downloader.downloadResult = new TikTokDownloader.DownloadedMedia(null, java.util.List.of(photoOne, photoTwo), audioPath);
         var sender = new StubTelegramVideoSender();
-        sender.sendVideoFailure = new TikTokDownloader.TikTokDownloadException("video send failed");
         var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
 
-        var exception = assertThrows(TikTokDownloader.TikTokDownloadException.class,
-                () -> handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123", "Username", "FirstName"), "123"));
+        var result = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123", "Username", "FirstName"), "123");
 
-        assertEquals("video send failed", exception.getMessage());
-        assertEquals(0, sender.deleteCalls);
+        assertNull(result);
+        assertEquals(1, sender.sendMediaGroupCalls);
+        assertEquals(java.util.List.of(photoOne, photoTwo), sender.lastMediaGroupPaths);
+        assertEquals(0, sender.sendVideoCalls);
+        assertEquals(1, sender.sendAudioCalls);
+        assertEquals(audioPath, sender.lastAudioPath);
+        assertEquals(1, sender.deleteCalls);
+        assertTrue(Files.notExists(photoOne));
+        assertTrue(Files.notExists(photoTwo));
+        assertTrue(Files.notExists(audioPath));
+    }
+
+    @Test
+    void returnsFallbackMessageAndCleansUpWhenAudioSendFails() throws IOException {
+        var videoPath = Files.createTempFile("telegram-handler-fail-", ".mp4");
+        Files.writeString(videoPath, "video-content");
+        var audioPath = Files.createTempFile("telegram-handler-fail-", ".mp3");
+        Files.writeString(audioPath, "audio-content");
+
+        var downloader = new StubTikTokDownloader();
+        downloader.downloadResult = new TikTokDownloader.DownloadedMedia(videoPath, java.util.List.of(), audioPath);
+        var sender = new StubTelegramVideoSender();
+        sender.sendAudioFailure = new TikTokDownloader.TikTokDownloadException("audio send failed");
+        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
+
+        var reply = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123", "Username", "FirstName"), "123");
+
+        assertEquals("Failed to process this TikTok link. Please try another link.",
+                ((org.apache.camel.component.telegram.model.OutgoingTextMessage) reply).getText());
+        assertEquals(1, sender.deleteCalls);
         assertTrue(Files.notExists(videoPath));
+        assertTrue(Files.notExists(audioPath));
     }
 
     private IncomingMessage incomingMessage(String text, String username, String firstName) {
@@ -109,7 +146,7 @@ class TelegramMessageHandlerTest {
 
     private static final class StubTikTokDownloader extends TikTokDownloader {
         private String lastUrl;
-        private Path downloadResult;
+        private DownloadedMedia downloadResult;
 
         private StubTikTokDownloader() {
             super(new ObjectMapper(),
@@ -118,7 +155,7 @@ class TelegramMessageHandlerTest {
         }
 
         @Override
-        public Path download(String url) {
+        public DownloadedMedia downloadMedia(String url) {
             lastUrl = url;
             return downloadResult;
         }
@@ -132,8 +169,16 @@ class TelegramMessageHandlerTest {
         private String lastChatId;
         private Path lastVideoPath;
         private String lastFileName;
+        private Path lastAudioPath;
+        private String lastAudioFileName;
+        private java.util.List<Path> lastMediaGroupPaths;
         private Long deletedMessageId;
         private RuntimeException sendVideoFailure;
+        private RuntimeException sendAudioFailure;
+        private RuntimeException sendMediaGroupFailure;
+        private int sendVideoCalls;
+        private int sendAudioCalls;
+        private int sendMediaGroupCalls;
 
         private StubTelegramVideoSender() {
             super("token", new ObjectMapper(), HttpClient.newHttpClient());
@@ -156,12 +201,34 @@ class TelegramMessageHandlerTest {
 
         @Override
         public void sendVideo(String chatId, Path videoPath, String fileName) {
+            sendVideoCalls++;
             if (sendVideoFailure != null) {
                 throw sendVideoFailure;
             }
             lastChatId = chatId;
             lastVideoPath = videoPath;
             lastFileName = fileName;
+        }
+
+        @Override
+        public void sendAudio(String chatId, Path audioPath, String fileName) {
+            sendAudioCalls++;
+            if (sendAudioFailure != null) {
+                throw sendAudioFailure;
+            }
+            lastChatId = chatId;
+            lastAudioPath = audioPath;
+            lastAudioFileName = fileName;
+        }
+
+        @Override
+        public void sendMediaGroup(String chatId, java.util.List<Path> photoPaths) {
+            sendMediaGroupCalls++;
+            if (sendMediaGroupFailure != null) {
+                throw sendMediaGroupFailure;
+            }
+            lastChatId = chatId;
+            lastMediaGroupPaths = java.util.List.copyOf(photoPaths);
         }
     }
 

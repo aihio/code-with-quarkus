@@ -11,6 +11,8 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
 
 @ApplicationScoped
 public class TelegramMessageHandler {
@@ -45,28 +47,56 @@ public class TelegramMessageHandler {
         }
 
         var progressMessageId = sendProgressIndicator(chatId);
-        var videoPath = tiktokDownloader.download(incoming);
-        var sent = false;
+        var downloadedPaths = new ArrayList<Path>();
         try {
-            var fileName = videoPath.getFileName().toString();
-            telegramVideoSender.sendVideo(chatId, videoPath, fileName);
-            sent = true;
-            // Video was already sent directly, so skip producer route output for this exchange.
+            var media = tiktokDownloader.downloadMedia(incoming);
+            downloadedPaths = collectDownloadedPaths(media);
+            if (media.gallery()) {
+                telegramVideoSender.sendMediaGroup(chatId, media.photoPaths());
+            } else {
+                var videoPath = media.videoPath();
+                if (videoPath == null) {
+                    throw new TikTokDownloader.TikTokDownloadException("Extraction failure: TikTok post has no playable media");
+                }
+                var fileName = videoPath.getFileName().toString();
+                telegramVideoSender.sendVideo(chatId, videoPath, fileName);
+            }
+
+            var audioPath = media.audioPath();
+            if (audioPath == null) {
+                throw new TikTokDownloader.TikTokDownloadException("Extraction failure: TikTok post has no audio track");
+            }
+            telegramVideoSender.sendAudio(chatId, audioPath, audioPath.getFileName().toString());
+            // Media was already sent directly, so skip producer route output for this exchange.
             return null;
+        } catch (RuntimeException e) {
+            return defaultMessageHandler.handle("Failed to process this TikTok link. Please try another link.");
         } finally {
-            try {
-                Files.deleteIfExists(videoPath);
-            } catch (IOException ignored) {
-                // ignore cleanup failure for temporary download artifacts
+            for (var path : downloadedPaths) {
+                try {
+                    Files.deleteIfExists(path);
+                } catch (IOException ignored) {
+                    // ignore cleanup failure for temporary download artifacts
+                }
             }
-            if (sent && progressMessageId != null) {
-                telegramVideoSender.deleteMessage(chatId, progressMessageId);
-            }
+            telegramVideoSender.deleteMessage(chatId, progressMessageId);
         }
     }
 
     private Long sendProgressIndicator(String chatId) {
         return telegramVideoSender.sendTextMessage(chatId, "⏳");
+    }
+
+    private ArrayList<Path> collectDownloadedPaths(TikTokDownloader.DownloadedMedia media) {
+        var paths = new ArrayList<Path>();
+        if (media.videoPath() != null) {
+            paths.add(media.videoPath());
+        }
+        paths.addAll(media.photoPaths());
+        if (media.audioPath() != null) {
+            paths.add(media.audioPath());
+        }
+        return paths;
     }
 
     private boolean isStartCommand(String incoming) {

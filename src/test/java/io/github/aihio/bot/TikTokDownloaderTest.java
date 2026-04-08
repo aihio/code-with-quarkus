@@ -80,6 +80,224 @@ class TikTokDownloaderTest {
     }
 
     @Test
+    void downloadMediaReturnsVideoAndAudioForVideoPosts() throws IOException {
+        var transport = new StubTransport();
+        transport.enqueueText(
+                "https://www.tiktok.com/@demo/video/1231231231231231231",
+                URI.create("https://www.tiktok.com/@demo/video/1231231231231231231"),
+                htmlWithUniversalData("""
+                        {
+                          "__DEFAULT_SCOPE__": {
+                            "webapp.video-detail": {
+                              "statusCode": 0,
+                              "itemInfo": {
+                                "itemStruct": {
+                                  "id": "1231231231231231231",
+                                  "video": {
+                                    "playAddr": "https://cdn.example.com/video-main.mp4"
+                                  },
+                                  "music": {
+                                    "playUrl": "https://cdn.example.com/audio-main.mp3"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                        """));
+        transport.enqueueDownload("https://cdn.example.com/audio-main.mp3", "audio-main");
+        transport.enqueueDownload("https://cdn.example.com/video-main.mp4", "video-main");
+
+        var downloader = downloader(transport, 0);
+        var media = downloader.downloadMedia("https://www.tiktok.com/@demo/video/1231231231231231231");
+        createdFiles.add(media.videoPath());
+        createdFiles.add(media.audioPath());
+
+        assertFalse(media.gallery());
+        assertNotNull(media.videoPath());
+        assertNotNull(media.audioPath());
+        assertEquals("video-main", Files.readString(media.videoPath()));
+        assertEquals("audio-main", Files.readString(media.audioPath()));
+    }
+
+    @Test
+    void downloadMediaReturnsGalleryPhotosAndAudioForImagePosts() throws IOException {
+        var transport = new StubTransport();
+        transport.enqueueText(
+                "https://www.tiktok.com/@demo/video/3213213213213213213",
+                URI.create("https://www.tiktok.com/@demo/video/3213213213213213213"),
+                htmlWithUniversalData("""
+                        {
+                          "__DEFAULT_SCOPE__": {
+                            "webapp.video-detail": {
+                              "statusCode": 0,
+                              "itemInfo": {
+                                "itemStruct": {
+                                  "id": "3213213213213213213",
+                                  "imagePost": {
+                                    "images": [
+                                      {
+                                        "imageURL": {
+                                          "urlList": ["https://cdn.example.com/gallery-1.jpg"]
+                                        }
+                                      },
+                                      {
+                                        "imageURL": {
+                                          "urlList": ["https://cdn.example.com/gallery-2.jpg"]
+                                        }
+                                      }
+                                    ]
+                                  },
+                                  "music": {
+                                    "playUrl": "https://cdn.example.com/gallery-audio.mp3"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                        """));
+        transport.enqueueDownload("https://cdn.example.com/gallery-audio.mp3", "gallery-audio");
+        transport.enqueueDownload("https://cdn.example.com/gallery-1.jpg", "gallery-photo-1");
+        transport.enqueueDownload("https://cdn.example.com/gallery-2.jpg", "gallery-photo-2");
+
+        var downloader = downloader(transport, 0);
+        var media = downloader.downloadMedia("https://www.tiktok.com/@demo/video/3213213213213213213");
+        createdFiles.add(media.audioPath());
+        for (var photoPath : media.photoPaths()) {
+            createdFiles.add(photoPath);
+        }
+
+        assertTrue(media.gallery());
+        assertNull(media.videoPath());
+        assertEquals(2, media.photoPaths().size());
+        assertEquals("gallery-audio", Files.readString(media.audioPath()));
+        assertEquals("gallery-photo-1", Files.readString(media.photoPaths().get(0)));
+        assertEquals("gallery-photo-2", Files.readString(media.photoPaths().get(1)));
+    }
+
+    @Test
+    void downloadMediaSupportsGalleryImagePostInfoSchema() throws IOException {
+        var transport = new StubTransport();
+        transport.enqueueText(
+                "https://www.tiktok.com/@demo/video/6546546546546546546",
+                URI.create("https://www.tiktok.com/@demo/video/6546546546546546546"),
+                htmlWithUniversalData("""
+                        {
+                          "__DEFAULT_SCOPE__": {
+                            "webapp.video-detail": {
+                              "statusCode": 0,
+                              "itemInfo": {
+                                "image_post_info": {
+                                  "images": [
+                                    {
+                                      "imageURL": {
+                                        "urlList": ["https://cdn.example.com/gallery-alt-1.jpg"]
+                                      }
+                                    }
+                                  ]
+                                },
+                                "music": {
+                                  "playUrl": "https://cdn.example.com/gallery-alt-audio.mp3"
+                                }
+                              }
+                            }
+                          }
+                        }
+                        """));
+        transport.enqueueDownload("https://cdn.example.com/gallery-alt-audio.mp3", "gallery-alt-audio");
+        transport.enqueueDownload("https://cdn.example.com/gallery-alt-1.jpg", "gallery-alt-photo");
+
+        var downloader = downloader(transport, 0);
+        var media = downloader.downloadMedia("https://www.tiktok.com/@demo/video/6546546546546546546");
+        createdFiles.add(media.audioPath());
+        for (var photoPath : media.photoPaths()) {
+            createdFiles.add(photoPath);
+        }
+
+        assertTrue(media.gallery());
+        assertEquals(1, media.photoPaths().size());
+        assertEquals("gallery-alt-audio", Files.readString(media.audioPath()));
+        assertEquals("gallery-alt-photo", Files.readString(media.photoPaths().get(0)));
+    }
+
+    @Test
+    void downloadsVideoWhenScriptPayloadIsWrappedInWindowAssignment() throws IOException {
+        var transport = new StubTransport();
+        transport.enqueueText(
+                "https://www.tiktok.com/@demo/video/7657657657657657657",
+                URI.create("https://www.tiktok.com/@demo/video/7657657657657657657"),
+                """
+                        <html>
+                          <head>
+                            <script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">
+                              window.__UNIVERSAL_DATA_FOR_REHYDRATION__ = {
+                                "__DEFAULT_SCOPE__": {
+                                  "webapp.video-detail": {
+                                    "statusCode": 0,
+                                    "itemInfo": {
+                                      "itemStruct": {
+                                        "video": {
+                                          "playAddr": "https://cdn.example.com/wrapped-video.mp4"
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              };
+                            </script>
+                          </head>
+                        </html>
+                        """);
+        transport.enqueueDownload("https://cdn.example.com/wrapped-video.mp4", "wrapped-video");
+
+        var downloader = downloader(transport, 0);
+        var downloaded = downloader.download("https://www.tiktok.com/@demo/video/7657657657657657657");
+        createdFiles.add(downloaded);
+
+        assertEquals("wrapped-video", Files.readString(downloaded));
+        assertEquals(URI.create("https://cdn.example.com/wrapped-video.mp4"), transport.lastDownloadedUri());
+    }
+
+    @Test
+    void downloadsVideoWhenPayloadIsInScriptWithoutKnownId() throws IOException {
+        var transport = new StubTransport();
+        transport.enqueueText(
+                "https://www.tiktok.com/@demo/video/7766554433221100998",
+                URI.create("https://www.tiktok.com/@demo/video/7766554433221100998"),
+                """
+                        <html>
+                          <head>
+                            <script>
+                              window.__SOME_RUNTIME_STATE__ = {
+                                "__DEFAULT_SCOPE__": {
+                                  "webapp.video-detail": {
+                                    "statusCode": 0,
+                                    "itemInfo": {
+                                      "itemStruct": {
+                                        "video": {
+                                          "playAddr": "https://cdn.example.com/no-id-video.mp4"
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              };
+                            </script>
+                          </head>
+                        </html>
+                        """);
+        transport.enqueueDownload("https://cdn.example.com/no-id-video.mp4", "no-id-video");
+
+        var downloader = downloader(transport, 0);
+        var downloaded = downloader.download("https://www.tiktok.com/@demo/video/7766554433221100998");
+        createdFiles.add(downloaded);
+
+        assertEquals("no-id-video", Files.readString(downloaded));
+        assertEquals(URI.create("https://cdn.example.com/no-id-video.mp4"), transport.lastDownloadedUri());
+    }
+
+    @Test
     void prefersNonWatermarkedPlayAddressOverWatermarkedDownloadAddress() throws IOException {
         var transport = new StubTransport();
         transport.enqueueText(
@@ -202,6 +420,199 @@ class TikTokDownloaderTest {
 
         assertEquals("url-key-quality-video", Files.readString(downloaded));
         assertEquals(URI.create("https://cdn.example.com/variant-720.mp4"), transport.lastDownloadedUri());
+    }
+
+    @Test
+    void prefersHigherBitrateEvenIfLowerBitrateAlternativeUsesH265() throws IOException {
+        var transport = new StubTransport();
+        transport.enqueueText(
+                "https://www.tiktok.com/@demo/video/3334445556667778889",
+                URI.create("https://www.tiktok.com/@demo/video/3334445556667778889"),
+                htmlWithUniversalData("""
+                        {
+                          "__DEFAULT_SCOPE__": {
+                            "webapp.video-detail": {
+                              "statusCode": 0,
+                              "itemInfo": {
+                                "itemStruct": {
+                                  "id": "3334445556667778889",
+                                  "video": {
+                                    "bitrateInfo": [
+                                      {
+                                        "Bitrate": 1000000,
+                                        "PlayAddr": {
+                                          "UrlList": ["https://cdn.example.com/h265-lower-bitrate.mp4"],
+                                          "UrlKey": "v100_bytevc1_720p_1000"
+                                        }
+                                      },
+                                      {
+                                        "Bitrate": 1500000,
+                                        "PlayAddr": {
+                                          "UrlList": ["https://cdn.example.com/h264-higher-bitrate.mp4"],
+                                          "UrlKey": "v100_h264_720p_1500"
+                                        }
+                                      }
+                                    ]
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                        """));
+        transport.enqueueDownload("https://cdn.example.com/h264-higher-bitrate.mp4", "higher-bitrate-video");
+
+        var downloader = downloader(transport, 0);
+        var downloaded = downloader.download("https://www.tiktok.com/@demo/video/3334445556667778889");
+        createdFiles.add(downloaded);
+
+        assertEquals("higher-bitrate-video", Files.readString(downloaded));
+        assertEquals(URI.create("https://cdn.example.com/h264-higher-bitrate.mp4"), transport.lastDownloadedUri());
+    }
+
+    @Test
+    void prefersH264WhenResolutionAndBitrateAreEqualForTelegramPlayback() throws IOException {
+        var transport = new StubTransport();
+        transport.enqueueText(
+                "https://www.tiktok.com/@demo/video/4445556667778889990",
+                URI.create("https://www.tiktok.com/@demo/video/4445556667778889990"),
+                htmlWithUniversalData("""
+                        {
+                          "__DEFAULT_SCOPE__": {
+                            "webapp.video-detail": {
+                              "statusCode": 0,
+                              "itemInfo": {
+                                "itemStruct": {
+                                  "id": "4445556667778889990",
+                                  "video": {
+                                    "bitrateInfo": [
+                                      {
+                                        "Bitrate": 1200000,
+                                        "PlayAddr": {
+                                          "UrlList": ["https://cdn.example.com/h264-equal.mp4"],
+                                          "UrlKey": "v101_h264_720p_1200"
+                                        }
+                                      },
+                                      {
+                                        "Bitrate": 1200000,
+                                        "PlayAddr": {
+                                          "UrlList": ["https://cdn.example.com/h265-equal.mp4"],
+                                          "UrlKey": "v101_bytevc1_720p_1200"
+                                        }
+                                      }
+                                    ]
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                        """));
+        transport.enqueueDownload("https://cdn.example.com/h264-equal.mp4", "h264-preferred-video");
+
+        var downloader = downloader(transport, 0);
+        var downloaded = downloader.download("https://www.tiktok.com/@demo/video/4445556667778889990");
+        createdFiles.add(downloaded);
+
+        assertEquals("h264-preferred-video", Files.readString(downloaded));
+        assertEquals(URI.create("https://cdn.example.com/h264-equal.mp4"), transport.lastDownloadedUri());
+    }
+
+    @Test
+    void prefersH264OverHigherResolutionH265ForSmootherTelegramPlayback() throws IOException {
+        var transport = new StubTransport();
+        transport.enqueueText(
+                "https://www.tiktok.com/@demo/video/6667778889990001112",
+                URI.create("https://www.tiktok.com/@demo/video/6667778889990001112"),
+                htmlWithUniversalData("""
+                        {
+                          "__DEFAULT_SCOPE__": {
+                            "webapp.video-detail": {
+                              "statusCode": 0,
+                              "itemInfo": {
+                                "itemStruct": {
+                                  "id": "6667778889990001112",
+                                  "video": {
+                                    "bitrateInfo": [
+                                      {
+                                        "Bitrate": 1400000,
+                                        "PlayAddr": {
+                                          "UrlList": ["https://cdn.example.com/h264-720.mp4"],
+                                          "UrlKey": "v103_h264_720p_1400"
+                                        }
+                                      },
+                                      {
+                                        "Bitrate": 2500000,
+                                        "PlayAddr": {
+                                          "UrlList": ["https://cdn.example.com/h265-1080.mp4"],
+                                          "UrlKey": "v103_bytevc1_1080p_2500"
+                                        }
+                                      }
+                                    ]
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                        """));
+        transport.enqueueDownload("https://cdn.example.com/h264-720.mp4", "telegram-smooth-video");
+
+        var downloader = downloader(transport, 0);
+        var downloaded = downloader.download("https://www.tiktok.com/@demo/video/6667778889990001112");
+        createdFiles.add(downloaded);
+
+        assertEquals("telegram-smooth-video", Files.readString(downloaded));
+        assertEquals(URI.create("https://cdn.example.com/h264-720.mp4"), transport.lastDownloadedUri());
+    }
+
+    @Test
+    void skipsUnplayableBytevc2AndUsesPlayableFallback() throws IOException {
+        var transport = new StubTransport();
+        transport.enqueueText(
+                "https://www.tiktok.com/@demo/video/5556667778889990001",
+                URI.create("https://www.tiktok.com/@demo/video/5556667778889990001"),
+                htmlWithUniversalData("""
+                        {
+                          "__DEFAULT_SCOPE__": {
+                            "webapp.video-detail": {
+                              "statusCode": 0,
+                              "itemInfo": {
+                                "itemStruct": {
+                                  "id": "5556667778889990001",
+                                  "video": {
+                                    "bitrateInfo": [
+                                      {
+                                        "Bitrate": 5000000,
+                                        "PlayAddr": {
+                                          "UrlList": ["https://cdn.example.com/unplayable-bytevc2.mp4"],
+                                          "UrlKey": "v102_bytevc2_1080p_5000"
+                                        }
+                                      },
+                                      {
+                                        "Bitrate": 2500000,
+                                        "PlayAddr": {
+                                          "UrlList": ["https://cdn.example.com/playable-h265.mp4"],
+                                          "UrlKey": "v102_bytevc1_720p_2500"
+                                        }
+                                      }
+                                    ]
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                        """));
+        transport.enqueueDownload("https://cdn.example.com/playable-h265.mp4", "playable-fallback-video");
+
+        var downloader = downloader(transport, 0);
+        var downloaded = downloader.download("https://www.tiktok.com/@demo/video/5556667778889990001");
+        createdFiles.add(downloaded);
+
+        assertEquals("playable-fallback-video", Files.readString(downloaded));
+        assertEquals(URI.create("https://cdn.example.com/playable-h265.mp4"), transport.lastDownloadedUri());
+        assertEquals(0, transport.downloadAttempts("https://cdn.example.com/unplayable-bytevc2.mp4"));
     }
 
     @Test
@@ -475,6 +886,146 @@ class TikTokDownloaderTest {
         assertEquals("second candidate failed", exception.getMessage());
     }
 
+    @Test
+    void downloadMediaSupportsPhotoRouteWithDirectImagesSchema() throws IOException {
+        var transport = new StubTransport();
+        transport.enqueueText(
+                "https://www.tiktok.com/@demo/photo/7615375482187435272",
+                URI.create("https://www.tiktok.com/@demo/photo/7615375482187435272"),
+                htmlWithUniversalData("""
+                        {
+                          "__DEFAULT_SCOPE__": {
+                            "webapp.photo-detail": {
+                              "statusCode": 0,
+                              "itemInfo": {
+                                "itemStruct": {
+                                  "id": "7615375482187435272",
+                                  "images": [
+                                    {
+                                      "imageURL": {
+                                        "urlList": ["https://cdn.example.com/direct-1.jpg"]
+                                      }
+                                    },
+                                    {
+                                      "display_image": {
+                                        "url_list": ["https://cdn.example.com/direct-2.jpg"]
+                                      }
+                                    }
+                                  ],
+                                  "music": {
+                                    "playUrl": "https://cdn.example.com/direct-audio.mp3"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                        """));
+        transport.enqueueDownload("https://cdn.example.com/direct-audio.mp3", "direct-audio");
+        transport.enqueueDownload("https://cdn.example.com/direct-1.jpg", "direct-photo-1");
+        transport.enqueueDownload("https://cdn.example.com/direct-2.jpg", "direct-photo-2");
+
+        var downloader = downloader(transport, 0);
+        var media = downloader.downloadMedia("https://www.tiktok.com/@demo/photo/7615375482187435272");
+        createdFiles.add(media.audioPath());
+        for (var photoPath : media.photoPaths()) {
+            createdFiles.add(photoPath);
+        }
+
+        assertTrue(media.gallery());
+        assertNull(media.videoPath());
+        assertEquals(2, media.photoPaths().size());
+        assertEquals("direct-audio", Files.readString(media.audioPath()));
+        assertEquals("direct-photo-1", Files.readString(media.photoPaths().get(0)));
+        assertEquals("direct-photo-2", Files.readString(media.photoPaths().get(1)));
+    }
+
+    @Test
+    void downloadMediaFallsBackToEmbedPageForPhotoRoutesWithoutHydrationItemStruct() throws IOException {
+        var photoId = "7615375482187435272";
+        var canonicalPhotoUrl = "https://www.tiktok.com/@canalguin/photo/" + photoId;
+
+        var transport = new StubTransport();
+        transport.enqueueText(
+                canonicalPhotoUrl,
+                URI.create(canonicalPhotoUrl),
+                "<html><head><script id=\"__UNIVERSAL_DATA_FOR_REHYDRATION__\" type=\"application/json\">{\"__DEFAULT_SCOPE__\":{\"seo.abtest\":{\"canonical\":\"" + canonicalPhotoUrl + "\"}}}</script></head></html>");
+
+        transport.enqueueText(
+                "https://www.tiktok.com/embed/v2/" + photoId,
+                URI.create("https://www.tiktok.com/embed/v2/" + photoId),
+                """
+                        <html>
+                          <head>
+                            <script id="__FRONTITY_CONNECT_STATE__" type="application/json">
+                              {
+                                "source": {
+                                  "data": {
+                                    "/embed/v2/7615375482187435272": {
+                                      "videoData": {
+                                        "itemInfos": {
+                                          "id": "7615375482187435272"
+                                        },
+                                        "musicInfos": {
+                                          "playUrl": ["https://cdn.example.com/embed-audio.mp3"]
+                                        },
+                                        "imagePostInfo": {
+                                          "images": [
+                                            {
+                                              "imageURL": {
+                                                "urlList": [
+                                                  "https://cdn.example.com/embed-photo-1.jpg",
+                                                  "https://cdn.example.com/embed-photo-1-alt.jpg"
+                                                ]
+                                              }
+                                            },
+                                            {
+                                              "imageURL": {
+                                                "urlList": [
+                                                  "https://cdn.example.com/embed-photo-2.jpg",
+                                                  "https://cdn.example.com/embed-photo-2-alt.jpg"
+                                                ]
+                                              }
+                                            }
+                                          ],
+                                          "displayImages": [
+                                            {
+                                              "urlList": ["https://cdn.example.com/embed-photo-1-display.jpg"]
+                                            },
+                                            {
+                                              "urlList": ["https://cdn.example.com/embed-photo-2-display.jpg"]
+                                            }
+                                          ]
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            </script>
+                          </head>
+                        </html>
+                        """);
+
+        transport.enqueueDownload("https://cdn.example.com/embed-audio.mp3", "embed-audio");
+        transport.enqueueDownload("https://cdn.example.com/embed-photo-1.jpg", "embed-photo-1");
+        transport.enqueueDownload("https://cdn.example.com/embed-photo-2.jpg", "embed-photo-2");
+
+        var downloader = downloader(transport, 0);
+        var media = downloader.downloadMedia(canonicalPhotoUrl);
+        createdFiles.add(media.audioPath());
+        createdFiles.addAll(media.photoPaths());
+
+        assertTrue(media.gallery());
+        assertEquals(2, media.photoPaths().size());
+        assertEquals("embed-photo-1", Files.readString(media.photoPaths().get(0)));
+        assertEquals("embed-photo-2", Files.readString(media.photoPaths().get(1)));
+        assertEquals(0, transport.downloadAttempts("https://cdn.example.com/embed-photo-1-alt.jpg"));
+        assertEquals(0, transport.downloadAttempts("https://cdn.example.com/embed-photo-1-display.jpg"));
+        assertEquals(0, transport.downloadAttempts("https://cdn.example.com/embed-photo-2-alt.jpg"));
+        assertEquals(0, transport.downloadAttempts("https://cdn.example.com/embed-photo-2-display.jpg"));
+    }
+
     private TikTokDownloader downloader(StubTransport transport, int retries) {
         return new TikTokDownloader(
                 objectMapper,
@@ -584,5 +1135,4 @@ class TikTokDownloaderTest {
         }
     }
 }
-
 

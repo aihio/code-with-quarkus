@@ -27,14 +27,19 @@ public class TikTokDownloader {
     private static final String DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36";
     private static final Pattern CANONICAL_LINK_PATTERN = Pattern.compile("<link[^>]*rel=[\"']canonical[\"'][^>]*href=[\"']([^\"']+)[\"'][^>]*>", Pattern.CASE_INSENSITIVE);
     private static final Pattern OG_URL_PATTERN = Pattern.compile("<meta[^>]*property=[\"']og:url[\"'][^>]*content=[\"']([^\"']+)[\"'][^>]*>", Pattern.CASE_INSENSITIVE);
-    private static final Pattern VIDEO_ID_PATTERN = Pattern.compile("/video/(\\d+)");
+    private static final Pattern VIDEO_ID_PATTERN = Pattern.compile("/(?:video|photo)/(\\d+)");
     private static final Pattern URL_KEY_PATTERN = Pattern.compile("v[^_]+_(?<codec>[^_]+)_(?<resolution>\\d+p)_(?<bitrate>\\d+)");
     private static final Set<String> JSON_SCRIPT_IDS = Set.of(
             "SIGI_STATE",
             "sigi-persisted-data",
             "__UNIVERSAL_DATA_FOR_REHYDRATION__",
-            "__NEXT_DATA__"
+            "__NEXT_DATA__",
+            "__FRONTITY_CONNECT_STATE__"
     );
+
+    private static final String AUDIO_SUFFIX = ".mp3";
+    private static final String VIDEO_SUFFIX = ".mp4";
+    private static final String PHOTO_SUFFIX = ".jpg";
 
     private final ObjectMapper objectMapper;
     private final Config config;
@@ -78,13 +83,301 @@ public class TikTokDownloader {
         for (var videoUrl : videoUrls) {
             try {
                 return withRetries("download TikTok video",
-                        () -> transport.downloadToTemp(URI.create(videoUrl), downloadHeaders(), ".mp4"));
+                        () -> transport.downloadToTemp(URI.create(videoUrl), downloadHeaders(), VIDEO_SUFFIX));
             } catch (TikTokDownloadException e) {
                 lastFailure = e;
             }
         }
 
         throw lastFailure;
+    }
+
+    public DownloadedMedia downloadMedia(String url) {
+        var inputUri = parseTikTokUri(url);
+        var page = withRetries("fetch TikTok page", () -> transport.getText(inputUri, pageHeaders()));
+
+        var pageUri = extractCanonicalUri(page.body())
+                .filter(uri -> isTikTokHost(uri.getHost()))
+                .orElse(page.uri());
+
+        var videoId = extractVideoId(pageUri).orElse(null);
+        var photoRoute = isPhotoRoute(pageUri);
+        var itemStruct = extractItemStructWithEmbedFallback(page.body(), videoId, photoRoute);
+        var audioPath = downloadAudio(itemStruct);
+        var photoUrls = selectPhotoUrls(itemStruct);
+        var photoPaths = new ArrayList<Path>();
+
+        if (!photoUrls.isEmpty()) {
+            try {
+                for (var photoUrl : photoUrls) {
+                    var photoPath = withRetries("download TikTok gallery image",
+                            () -> transport.downloadToTemp(URI.create(photoUrl), downloadHeaders(), PHOTO_SUFFIX));
+                    photoPaths.add(photoPath);
+                }
+                return new DownloadedMedia(null, photoPaths, audioPath);
+            } catch (RuntimeException e) {
+                deleteAllQuietly(photoPaths);
+                deleteQuietly(audioPath);
+                throw e;
+            }
+        }
+
+        var videoUrls = selectVideoUrls(itemStruct);
+        if (videoUrls.isEmpty()) {
+            deleteQuietly(audioPath);
+            throw new TikTokDownloadException("Extraction failure: unable to find a playable TikTok video URL");
+        }
+
+        TikTokDownloadException lastFailure = null;
+        for (var videoUrl : videoUrls) {
+            try {
+                var videoPath = withRetries("download TikTok video",
+                        () -> transport.downloadToTemp(URI.create(videoUrl), downloadHeaders(), VIDEO_SUFFIX));
+                return new DownloadedMedia(videoPath, List.of(), audioPath);
+            } catch (TikTokDownloadException e) {
+                lastFailure = e;
+            }
+        }
+
+        deleteQuietly(audioPath);
+        throw lastFailure;
+    }
+
+    private Path downloadAudio(JsonNode itemStruct) {
+        var audioUrls = selectAudioUrls(itemStruct);
+        if (audioUrls.isEmpty()) {
+            throw new TikTokDownloadException("Extraction failure: unable to find TikTok audio track");
+        }
+
+        TikTokDownloadException lastFailure = null;
+        for (var audioUrl : audioUrls) {
+            try {
+                return withRetries("download TikTok audio",
+                        () -> transport.downloadToTemp(URI.create(audioUrl), downloadHeaders(), AUDIO_SUFFIX));
+            } catch (TikTokDownloadException e) {
+                lastFailure = e;
+            }
+        }
+
+        throw lastFailure;
+    }
+
+    private JsonNode extractItemStructWithEmbedFallback(String html, String expectedVideoId, boolean photoRoute) {
+        try {
+            return extractItemStruct(html, expectedVideoId);
+        } catch (TikTokDownloadException originalFailure) {
+            if (!photoRoute || expectedVideoId == null || expectedVideoId.isBlank()) {
+                throw originalFailure;
+            }
+
+            var embedUri = URI.create("https://www.tiktok.com/embed/v2/" + expectedVideoId);
+            try {
+                var embedPage = withRetries("fetch TikTok embed page", () -> transport.getText(embedUri, pageHeaders()));
+                return extractItemStruct(embedPage.body(), expectedVideoId);
+            } catch (RuntimeException ignored) {
+                throw originalFailure;
+            }
+        }
+    }
+
+    private boolean isPhotoRoute(URI uri) {
+        if (uri == null || uri.getPath() == null) {
+            return false;
+        }
+        return uri.getPath().contains("/photo/");
+    }
+
+    private List<String> selectAudioUrls(JsonNode itemStruct) {
+        var music = at(itemStruct, "music");
+        if (!music.isObject()) {
+            music = at(itemStruct, "musicInfos");
+        }
+        if (!music.isObject()) {
+            return List.of();
+        }
+
+        var candidates = new LinkedHashSet<String>();
+        addNormalizedUrl(candidates, textValue(music, "playUrl").orElse(null));
+        addNormalizedUrl(candidates, textValue(music, "play_url").orElse(null));
+        addNormalizedUrl(candidates, textValue(music, "playUrlHq").orElse(null));
+        addNormalizedUrl(candidates, textValue(music, "play_url_hq").orElse(null));
+        addNormalizedUrl(candidates, textValue(at(music, "playUrl"), "uri").orElse(null));
+        addNormalizedUrl(candidates, textValue(at(music, "play_url"), "uri").orElse(null));
+        addUrlArray(candidates, at(music, "playUrl"));
+        addUrlArray(candidates, at(music, "play_url"));
+        addUrlArray(candidates, at(music, "playUrl", "urlList"));
+        addUrlArray(candidates, at(music, "play_url", "url_list"));
+        addUrlArray(candidates, at(music, "playUrl", "UrlList"));
+        addUrlArray(candidates, at(music, "play_url", "UrlList"));
+        return candidates.stream().toList();
+    }
+
+    private List<String> selectPhotoUrls(JsonNode itemStruct) {
+        var imagePost = firstImagePostNode(itemStruct);
+        if (imagePost == null) {
+            return List.of();
+        }
+
+        var urls = new LinkedHashSet<String>();
+        var images = at(imagePost, "images");
+        if (images.isArray() && !images.isEmpty()) {
+            for (var image : images) {
+                addPreferredImageUrl(urls, image);
+            }
+            return urls.stream().toList();
+        }
+
+        var displayImages = at(imagePost, "displayImages");
+        if (displayImages.isArray()) {
+            for (var image : displayImages) {
+                addPreferredDisplayImageUrl(urls, image);
+            }
+        }
+
+        return urls.stream().toList();
+    }
+
+    private void addPreferredImageUrl(Set<String> urls, JsonNode image) {
+        addPreferredUrl(urls,
+                at(image, "imageURL", "urlList"),
+                at(image, "imageURL", "url_list"),
+                at(image, "displayImage", "urlList"),
+                at(image, "displayImage", "url_list"),
+                at(image, "display_image", "url_list"),
+                at(image, "imageUrl", "urlList"),
+                at(image, "imageUrl", "url_list"),
+                at(image, "image_url", "url_list"),
+                at(image, "ownerWatermarkImage", "urlList"),
+                at(image, "ownerWatermarkImage", "url_list"),
+                at(image, "urlList"),
+                at(image, "url_list")
+        );
+    }
+
+    private void addPreferredDisplayImageUrl(Set<String> urls, JsonNode image) {
+        addPreferredUrl(urls,
+                at(image, "urlList"),
+                at(image, "url_list"),
+                at(image, "displayImage", "urlList"),
+                at(image, "displayImage", "url_list"),
+                at(image, "imageURL", "urlList"),
+                at(image, "imageURL", "url_list")
+        );
+    }
+
+    private void addPreferredUrl(Set<String> urls, JsonNode... candidates) {
+        for (var candidate : candidates) {
+            var preferred = firstNormalizedUrl(candidate);
+            if (preferred.isPresent()) {
+                urls.add(preferred.get());
+                return;
+            }
+        }
+    }
+
+    private Optional<String> firstNormalizedUrl(JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return Optional.empty();
+        }
+        for (var entry : node) {
+            if (!entry.isTextual()) {
+                continue;
+            }
+            var normalized = normalizeMediaUrl(entry.asText());
+            if (normalized.isPresent()) {
+                return normalized;
+            }
+        }
+        return Optional.empty();
+    }
+
+    private JsonNode firstImagePostNode(JsonNode itemStruct) {
+        for (var path : List.of(
+                new String[]{"imagePost"},
+                new String[]{"image_post_info"},
+                new String[]{"imagePostInfo"},
+                new String[]{"imagePostInfo", "imagePost"},
+                new String[]{}
+        )) {
+            var candidate = at(itemStruct, path);
+            if (candidate.isObject() && hasPhotoMedia(candidate)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private boolean hasPhotoMedia(JsonNode node) {
+        return containsPhotoImages(node) || containsDisplayImages(node);
+    }
+
+    private boolean containsPhotoImages(JsonNode node) {
+        var images = at(node, "images");
+        if (!images.isArray() || images.isEmpty()) {
+            return false;
+        }
+
+        for (var image : images) {
+            if (at(image, "imageURL", "urlList").isArray()
+                    || at(image, "imageURL", "url_list").isArray()
+                    || at(image, "displayImage", "urlList").isArray()
+                    || at(image, "displayImage", "url_list").isArray()
+                    || at(image, "ownerWatermarkImage", "urlList").isArray()
+                    || at(image, "ownerWatermarkImage", "url_list").isArray()
+                    || at(image, "imageUrl", "urlList").isArray()
+                    || at(image, "imageUrl", "url_list").isArray()
+                    || at(image, "image_url", "url_list").isArray()
+                    || at(image, "urlList").isArray()
+                    || at(image, "url_list").isArray()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean containsDisplayImages(JsonNode node) {
+        var displayImages = at(node, "displayImages");
+        if (!displayImages.isArray() || displayImages.isEmpty()) {
+            return false;
+        }
+        for (var image : displayImages) {
+            if (at(image, "urlList").isArray() || at(image, "url_list").isArray()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void addUrlArray(Set<String> urls, JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return;
+        }
+        for (var entry : node) {
+            if (entry.isTextual()) {
+                addNormalizedUrl(urls, entry.asText());
+            }
+        }
+    }
+
+    private void addNormalizedUrl(Set<String> urls, String rawUrl) {
+        normalizeMediaUrl(rawUrl).ifPresent(urls::add);
+    }
+
+    private void deleteAllQuietly(Collection<Path> paths) {
+        for (var path : paths) {
+            deleteQuietly(path);
+        }
+    }
+
+    private void deleteQuietly(Path path) {
+        if (path == null) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(path);
+        } catch (IOException ignored) {
+            // best effort cleanup only
+        }
     }
 
     private <T> T withRetries(String action, ThrowingSupplier<T> supplier) {
@@ -144,7 +437,28 @@ public class TikTokDownloader {
         for (var scriptId : JSON_SCRIPT_IDS) {
             findScriptJson(html, scriptId).ifPresent(roots::add);
         }
+        if (!roots.isEmpty()) {
+            return roots;
+        }
+
+        // Some TikTok pages no longer expose hydration data under stable script IDs.
+        for (var scriptBody : extractAllScriptBodies(html)) {
+            parseJson(scriptBody).ifPresent(roots::add);
+            for (var candidateJson : extractJsonObjects(scriptBody)) {
+                parseJson(candidateJson).ifPresent(roots::add);
+            }
+        }
         return roots;
+    }
+
+    private List<String> extractAllScriptBodies(String html) {
+        var scripts = new ArrayList<String>();
+        var pattern = Pattern.compile("<script[^>]*>(.*?)</script>", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+        var matcher = pattern.matcher(html);
+        while (matcher.find()) {
+            scripts.add(matcher.group(1));
+        }
+        return scripts;
     }
 
     private Optional<JsonNode> findScriptJson(String html, String scriptId) {
@@ -156,7 +470,100 @@ public class TikTokDownloader {
         if (!matcher.find()) {
             return Optional.empty();
         }
-        return parseJson(matcher.group(1));
+        var scriptBody = matcher.group(1);
+        var parsed = parseJson(scriptBody);
+        if (parsed.isPresent()) {
+            return parsed;
+        }
+        return extractFirstJsonObject(scriptBody).flatMap(this::parseJson);
+    }
+
+    private Optional<String> extractFirstJsonObject(String scriptBody) {
+        if (scriptBody == null || scriptBody.isBlank()) {
+            return Optional.empty();
+        }
+
+        var start = scriptBody.indexOf('{');
+        if (start < 0) {
+            return Optional.empty();
+        }
+
+        var depth = 0;
+        var inString = false;
+        var escaped = false;
+        for (var index = start; index < scriptBody.length(); index++) {
+            var ch = scriptBody.charAt(index);
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (ch == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (ch == '"') {
+                inString = !inString;
+                continue;
+            }
+            if (inString) {
+                continue;
+            }
+            if (ch == '{') {
+                depth++;
+            } else if (ch == '}') {
+                depth--;
+                if (depth == 0) {
+                    return Optional.of(scriptBody.substring(start, index + 1));
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
+    private List<String> extractJsonObjects(String scriptBody) {
+        var jsonObjects = new ArrayList<String>();
+        if (scriptBody == null || scriptBody.isBlank()) {
+            return jsonObjects;
+        }
+
+        var inString = false;
+        var escaped = false;
+        var depth = 0;
+        var start = -1;
+        for (var index = 0; index < scriptBody.length(); index++) {
+            var ch = scriptBody.charAt(index);
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (ch == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (ch == '"') {
+                inString = !inString;
+                continue;
+            }
+            if (inString) {
+                continue;
+            }
+            if (ch == '{') {
+                if (depth == 0) {
+                    start = index;
+                }
+                depth++;
+            } else if (ch == '}') {
+                if (depth == 0) {
+                    continue;
+                }
+                depth--;
+                if (depth == 0 && start >= 0) {
+                    jsonObjects.add(scriptBody.substring(start, index + 1));
+                    start = -1;
+                }
+            }
+        }
+        return jsonObjects;
     }
 
     private Optional<JsonNode> parseJson(String rawJson) {
@@ -193,8 +600,15 @@ public class TikTokDownloader {
     private List<JsonNode> directCandidates(JsonNode root, String expectedVideoId) {
         var candidates = new ArrayList<JsonNode>();
         addIfPresent(candidates, at(root, "__DEFAULT_SCOPE__", "webapp.video-detail", "itemInfo", "itemStruct"));
+        addIfPresent(candidates, at(root, "__DEFAULT_SCOPE__", "webapp.video-detail", "itemInfo"));
+        addIfPresent(candidates, at(root, "__DEFAULT_SCOPE__", "webapp.photo-detail", "itemInfo", "itemStruct"));
+        addIfPresent(candidates, at(root, "__DEFAULT_SCOPE__", "webapp.photo-detail", "itemInfo"));
         addIfPresent(candidates, at(root, "webapp.video-detail", "itemInfo", "itemStruct"));
+        addIfPresent(candidates, at(root, "webapp.video-detail", "itemInfo"));
+        addIfPresent(candidates, at(root, "webapp.photo-detail", "itemInfo", "itemStruct"));
+        addIfPresent(candidates, at(root, "webapp.photo-detail", "itemInfo"));
         addIfPresent(candidates, at(root, "props", "pageProps", "itemInfo", "itemStruct"));
+        addIfPresent(candidates, at(root, "props", "pageProps", "itemInfo"));
         addIfPresent(candidates, at(root, "props", "pageProps", "itemStruct"));
 
         var itemModule = at(root, "ItemModule");
@@ -210,14 +624,18 @@ public class TikTokDownloader {
     private Optional<String> detectStatusFailure(JsonNode root) {
         var statusMessage = firstText(root, List.of(
                 List.of("__DEFAULT_SCOPE__", "webapp.video-detail", "statusMsg"),
+                List.of("__DEFAULT_SCOPE__", "webapp.photo-detail", "statusMsg"),
                 List.of("webapp.video-detail", "statusMsg"),
+                List.of("webapp.photo-detail", "statusMsg"),
                 List.of("VideoPage", "statusMsg"),
                 List.of("props", "pageProps", "statusMsg")
         )).orElse("");
 
         var statusCode = firstInt(root, List.of(
                 List.of("__DEFAULT_SCOPE__", "webapp.video-detail", "statusCode"),
+                List.of("__DEFAULT_SCOPE__", "webapp.photo-detail", "statusCode"),
                 List.of("webapp.video-detail", "statusCode"),
+                List.of("webapp.photo-detail", "statusCode"),
                 List.of("VideoPage", "statusCode"),
                 List.of("props", "pageProps", "statusCode")
         )).orElse(null);
@@ -247,16 +665,17 @@ public class TikTokDownloader {
         var height = intValue(video, "height");
         var candidates = new LinkedHashMap<String, VideoCandidate>();
         var baseQualityRank = qualityRank(width, height, null);
+        var directCodecRank = codecRankForNode(video, codecRank("h264"));
 
-        addCandidate(candidates, textValue(video, "playAddr").orElse(null), true, width, height, 0, 50, baseQualityRank);
-        addCandidate(candidates, textValue(video, "playAddrH264").orElse(null), true, width, height, 0, 49, baseQualityRank);
-        addCandidate(candidates, textValue(video, "playAddrBytevc1").orElse(null), true, width, height, 0, 48, baseQualityRank);
-        addCandidate(candidates, textValue(video, "downloadAddr").orElse(null), !hasWatermark, width, height, 0, hasWatermark ? 10 : 40, baseQualityRank);
+        addCandidate(candidates, textValue(video, "playAddr").orElse(null), true, width, height, 0, 50, baseQualityRank, directCodecRank);
+        addCandidate(candidates, textValue(video, "playAddrH264").orElse(null), true, width, height, 0, 49, baseQualityRank, codecRank("h264"));
+        addCandidate(candidates, textValue(video, "playAddrBytevc1").orElse(null), true, width, height, 0, 48, baseQualityRank, codecRank("h265"));
+        addCandidate(candidates, textValue(video, "downloadAddr").orElse(null), !hasWatermark, width, height, 0, hasWatermark ? 10 : 40, baseQualityRank, codecRank("h264"));
 
-        addAddressCandidates(candidates, at(video, "play_addr"), true, width, height, 0, 50);
-        addAddressCandidates(candidates, at(video, "play_addr_h264"), true, width, height, 0, 49);
-        addAddressCandidates(candidates, at(video, "play_addr_bytevc1"), true, width, height, 0, 48);
-        addAddressCandidates(candidates, at(video, "download_addr"), !hasWatermark, width, height, 0, hasWatermark ? 10 : 40);
+        addAddressCandidates(candidates, at(video, "play_addr"), true, width, height, 0, 50, directCodecRank);
+        addAddressCandidates(candidates, at(video, "play_addr_h264"), true, width, height, 0, 49, codecRank("h264"));
+        addAddressCandidates(candidates, at(video, "play_addr_bytevc1"), true, width, height, 0, 48, codecRank("h265"));
+        addAddressCandidates(candidates, at(video, "download_addr"), !hasWatermark, width, height, 0, hasWatermark ? 10 : 40, codecRank("h264"));
 
         var bitrateInfo = firstArray(video);
         if (bitrateInfo != null) {
@@ -279,8 +698,9 @@ public class TikTokDownloader {
                         List.of("PlayAddr", "Height"),
                         List.of("play_addr", "height")
                 )).orElse(height);
+                var variantCodecRank = codecRankForNode(playAddr, codecRankForNode(variant, directCodecRank));
 
-                addAddressCandidates(candidates, playAddr, true, variantWidth, variantHeight, variantBitrate, 60);
+                addAddressCandidates(candidates, playAddr, true, variantWidth, variantHeight, variantBitrate, 60, variantCodecRank);
             }
         }
 
@@ -292,7 +712,8 @@ public class TikTokDownloader {
     }
 
     private void addAddressCandidates(Map<String, VideoCandidate> candidates, JsonNode address, boolean noWatermark,
-                                      int fallbackWidth, int fallbackHeight, int fallbackBitrate, int sourcePriority) {
+                                      int fallbackWidth, int fallbackHeight, int fallbackBitrate, int sourcePriority,
+                                      int fallbackCodecRank) {
         if (address == null || address.isMissingNode() || address.isNull()) {
             return;
         }
@@ -308,30 +729,37 @@ public class TikTokDownloader {
                 .or(() -> textValue(address, "UrlKey"))
                 .orElse(null);
         var parsedUrlKey = parseUrlKey(urlKey);
-        int bitrate = parsedUrlKey.map(UrlKeyMetadata::bitrate).filter(value -> value > 0).orElse(fallbackBitrate);
+        var bitrate = parsedUrlKey.map(UrlKeyMetadata::bitrate).filter(value -> value > 0).orElse(fallbackBitrate);
         var qualityRank = qualityRank(width, height, parsedUrlKey.map(UrlKeyMetadata::resolution).orElse(null));
+        var codecRank = parsedUrlKey.map(UrlKeyMetadata::codec).map(this::codecRank)
+                .orElseGet(() -> codecRankForNode(address, fallbackCodecRank));
 
-        addUrlListCandidates(candidates, at(address, "UrlList"), noWatermark, width, height, bitrate, sourcePriority, qualityRank);
-        addUrlListCandidates(candidates, at(address, "url_list"), noWatermark, width, height, bitrate, sourcePriority, qualityRank);
+        addUrlListCandidates(candidates, at(address, "UrlList"), noWatermark, width, height, bitrate, sourcePriority, qualityRank, codecRank);
+        addUrlListCandidates(candidates, at(address, "url_list"), noWatermark, width, height, bitrate, sourcePriority, qualityRank, codecRank);
     }
 
     private void addUrlListCandidates(Map<String, VideoCandidate> candidates, JsonNode urlList, boolean noWatermark,
-                                      int width, int height, int bitrate, int sourcePriority, int qualityRank) {
+                                      int width, int height, int bitrate, int sourcePriority, int qualityRank,
+                                      int codecRank) {
         if (urlList == null || !urlList.isArray()) {
             return;
         }
         for (var entry : urlList) {
             if (entry.isTextual()) {
-                addCandidate(candidates, entry.asText(), noWatermark, width, height, bitrate, sourcePriority, qualityRank);
+                addCandidate(candidates, entry.asText(), noWatermark, width, height, bitrate, sourcePriority, qualityRank, codecRank);
             }
         }
     }
 
     private void addCandidate(Map<String, VideoCandidate> candidates, String rawUrl, boolean noWatermark,
-                              int width, int height, int bitrate, int sourcePriority, int qualityRank) {
+                              int width, int height, int bitrate, int sourcePriority, int qualityRank,
+                              int codecRank) {
+        if (codecRank < 0) {
+            return;
+        }
         normalizeMediaUrl(rawUrl).ifPresent(url -> candidates.merge(
                 url,
-                new VideoCandidate(url, noWatermark, width, height, bitrate, sourcePriority, qualityRank),
+                new VideoCandidate(url, noWatermark, width, height, bitrate, sourcePriority, qualityRank, codecRank),
                 this::betterCandidate
         ));
     }
@@ -344,10 +772,11 @@ public class TikTokDownloader {
     private Comparator<VideoCandidate> candidateComparator() {
         return Comparator
                 .comparing(VideoCandidate::noWatermark)
+                .thenComparingInt(VideoCandidate::codecRank)
                 .thenComparingInt(VideoCandidate::qualityRank)
+                .thenComparingInt(VideoCandidate::bitrate)
                 .thenComparingInt(VideoCandidate::height)
                 .thenComparingInt(VideoCandidate::width)
-                .thenComparingInt(VideoCandidate::bitrate)
                 .thenComparingInt(VideoCandidate::sourcePriority);
     }
 
@@ -362,8 +791,47 @@ public class TikTokDownloader {
         }
 
         var resolution = matcher.group("resolution");
+        var codec = normalizeCodec(matcher.group("codec"));
         var bitrate = parsePositiveInt(matcher.group("bitrate")).orElse(0);
-        return Optional.of(new UrlKeyMetadata(resolution, bitrate, qualityRank(0, 0, resolution)));
+        return Optional.of(new UrlKeyMetadata(codec, resolution, bitrate, qualityRank(0, 0, resolution)));
+    }
+
+    private int codecRankForNode(JsonNode node, int fallback) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return fallback;
+        }
+
+        if (booleanValue(node, "is_bytevc2", "isBytevc2")) {
+            return codecRank("bytevc2");
+        }
+        if (booleanValue(node, "is_bytevc1", "isBytevc1", "is_h265", "isH265")) {
+            return codecRank("h265");
+        }
+
+        var codec = textValue(node, "codec_type")
+                .or(() -> textValue(node, "CodecType"))
+                .or(() -> textValue(node, "codec"))
+                .or(() -> textValue(node, "Codec"))
+                .or(() -> textValue(node, "vcodec"));
+        return codec.map(this::codecRank).orElse(fallback);
+    }
+
+    private String normalizeCodec(String codec) {
+        if (codec == null || codec.isBlank()) {
+            return "";
+        }
+        return codec.toLowerCase(Locale.ROOT);
+    }
+
+    private int codecRank(String codec) {
+        var normalized = normalizeCodec(codec);
+        return switch (normalized) {
+            case "bytevc2", "h266", "vvc" -> -100;
+            case "h264", "avc", "avc1" -> 3;
+            case "bytevc1", "h265", "hevc" -> 2;
+            case "" -> 0;
+            default -> 1;
+        };
     }
 
     private int qualityRank(int width, int height, String resolution) {
@@ -486,7 +954,14 @@ public class TikTokDownloader {
     }
 
     private boolean isItemStruct(JsonNode node) {
-        return node != null && node.isObject() && at(node, "video").isObject();
+        if (node == null || !node.isObject()) {
+            return false;
+        }
+        return at(node, "video").isObject()
+                || hasPhotoMedia(at(node, "imagePost"))
+                || hasPhotoMedia(at(node, "image_post_info"))
+                || hasPhotoMedia(at(node, "imagePostInfo"))
+                || hasPhotoMedia(node);
     }
 
     private Optional<JsonNode> findObjectWithVideo(JsonNode root) {
@@ -591,7 +1066,11 @@ public class TikTokDownloader {
     }
 
     private boolean booleanValue(JsonNode root) {
-        for (var fieldName : new String[]{"hasWatermark", "has_watermark"}) {
+        return booleanValue(root, "hasWatermark", "has_watermark");
+    }
+
+    private boolean booleanValue(JsonNode root, String... fieldNames) {
+        for (var fieldName : fieldNames) {
             var node = at(root, fieldName);
             if (node.isBoolean()) {
                 return node.asBoolean();
@@ -647,11 +1126,21 @@ public class TikTokDownloader {
     record Response<T>(URI uri, int statusCode, T body) {
     }
 
-    private record VideoCandidate(String url, boolean noWatermark, int width, int height, int bitrate,
-                                  int sourcePriority, int qualityRank) {
+    public record DownloadedMedia(Path videoPath, List<Path> photoPaths, Path audioPath) {
+        public DownloadedMedia {
+            photoPaths = photoPaths == null ? List.of() : List.copyOf(photoPaths);
+        }
+
+        public boolean gallery() {
+            return !photoPaths.isEmpty();
+        }
     }
 
-    private record UrlKeyMetadata(String resolution, int bitrate, int qualityRank) {
+    private record VideoCandidate(String url, boolean noWatermark, int width, int height, int bitrate,
+                                  int sourcePriority, int qualityRank, int codecRank) {
+    }
+
+    private record UrlKeyMetadata(String codec, String resolution, int bitrate, int qualityRank) {
     }
 
     public record Config(Duration connectTimeout, Duration readTimeout, int retries, String userAgent) {
@@ -755,3 +1244,4 @@ public class TikTokDownloader {
         private static final JsonNode INSTANCE = MissingNode.getInstance();
     }
 }
+
