@@ -28,6 +28,8 @@ jobs:
 
       - name: Set up Gradle (cache dependencies and wrapper)
         uses: gradle/actions/setup-gradle@v5
+        with:
+          build-scan-publish: true
 
       - name: Diagnostic versions
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
