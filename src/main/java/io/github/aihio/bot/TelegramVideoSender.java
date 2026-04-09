@@ -65,12 +65,16 @@ public class TelegramVideoSender {
         }
     }
 
-    public void sendVideo(String chatId, Path videoPath, String fileName) {
-        uploadMultipart("sendVideo", List.of(
-                new FieldPart("chat_id", chatId),
-                new FieldPart("supports_streaming", "true"),
-                new FilePart("video", fileName, "video/mp4", videoPath)
-        ));
+    public void sendVideo(String chatId, Path videoPath, String fileName, int width, int height) {
+        var parts = new ArrayList<MultipartPart>();
+        parts.add(new FieldPart("chat_id", chatId));
+        parts.add(new FieldPart("supports_streaming", "true"));
+        if (width > 0 && height > 0) {
+            parts.add(new FieldPart("width", String.valueOf(width)));
+            parts.add(new FieldPart("height", String.valueOf(height)));
+        }
+        parts.add(new FilePart("video", fileName, "video/mp4", videoPath));
+        uploadMultipart("sendVideo", parts);
     }
 
     public void sendAudio(String chatId, Path audioPath, String fileName) {

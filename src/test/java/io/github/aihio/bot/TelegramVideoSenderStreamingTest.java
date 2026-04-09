@@ -41,7 +41,7 @@ class TelegramVideoSenderStreamingTest {
             writeRandomFile(file);
             var fileSize = Files.size(file);
 
-            sender.sendVideo("123", file, "streaming.mp4");
+            sender.sendVideo("123", file, "streaming.mp4", 0, 0);
 
             assertTrue(httpClient.chunkCount > 3, "multipart publisher should emit multiple chunks");
             assertTrue(httpClient.publishedBytes > fileSize, "multipart envelope must add overhead");

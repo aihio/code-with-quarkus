@@ -122,7 +122,8 @@ public class TelegramMessageHandler {
         if (videoPath == null) {
             throw new TikTokDownloader.TikTokDownloadException("Extraction failure: TikTok post has no playable media");
         }
-        telegramVideoSender.sendVideo(chatId, videoPath, videoPath.getFileName().toString());
+        telegramVideoSender.sendVideo(chatId, videoPath, videoPath.getFileName().toString(),
+                media.videoWidth(), media.videoHeight());
     }
 
     private void sendAudio(String chatId, Path audioPath) {

@@ -77,7 +77,7 @@ public class TikTokDownloader {
                             () -> transport.downloadToTemp(URI.create(photoUrl), downloadHeaders(), PHOTO_SUFFIX));
                     photoPaths.add(photoPath);
                 }
-                return new DownloadedMedia(null, photoPaths, audioPath);
+                return new DownloadedMedia(null, photoPaths, audioPath, 0, 0);
             } catch (RuntimeException e) {
                 deleteAllQuietly(photoPaths);
                 deleteQuietly(audioPath);
@@ -85,8 +85,11 @@ public class TikTokDownloader {
             }
         }
 
+        var videoSelection = videoSelector.selectVideo(itemStruct);
         try {
-            return new DownloadedMedia(downloadVideo(itemStruct), List.of(), audioPath);
+            var videoPath = downloadFromCandidates(videoSelection.urls(), "download TikTok video", VIDEO_SUFFIX,
+                    "Extraction failure: unable to find a playable TikTok video URL");
+            return new DownloadedMedia(videoPath, List.of(), audioPath, videoSelection.width(), videoSelection.height());
         } catch (RuntimeException e) {
             deleteQuietly(audioPath);
             throw e;
@@ -289,7 +292,8 @@ public class TikTokDownloader {
     public record Response<T>(URI uri, int statusCode, T body) {
     }
 
-    public record DownloadedMedia(Path videoPath, List<Path> photoPaths, Path audioPath) {
+    public record DownloadedMedia(Path videoPath, List<Path> photoPaths, Path audioPath, int videoWidth,
+                                  int videoHeight) {
         public DownloadedMedia {
             photoPaths = photoPaths == null ? List.of() : List.copyOf(photoPaths);
         }

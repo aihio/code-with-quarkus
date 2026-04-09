@@ -65,7 +65,7 @@ class TelegramMessageHandlerTest {
         Files.writeString(audioPath, "audio-content");
 
         var downloader = new StubTikTokDownloader();
-        downloader.downloadResult = new TikTokDownloader.DownloadedMedia(videoPath, java.util.List.of(), audioPath);
+        downloader.downloadResult = new TikTokDownloader.DownloadedMedia(videoPath, java.util.List.of(), audioPath, 720, 1280);
         var sender = new StubTelegramVideoSender();
         sender.progressMessageId = 77L;
         var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
@@ -79,6 +79,8 @@ class TelegramMessageHandlerTest {
         assertEquals("123", sender.lastChatId);
         assertEquals(videoPath.getFileName().toString(), sender.lastFileName);
         assertEquals(videoPath, sender.lastVideoPath);
+        assertEquals(720, sender.lastVideoWidth);
+        assertEquals(1280, sender.lastVideoHeight);
         assertEquals(audioPath, sender.lastAudioPath);
         assertEquals(audioPath.getFileName().toString(), sender.lastAudioFileName);
         assertEquals(1, sender.sendAudioCalls);
@@ -98,7 +100,7 @@ class TelegramMessageHandlerTest {
         Files.writeString(audioPath, "audio-content");
 
         var downloader = new StubTikTokDownloader();
-        downloader.downloadResult = new TikTokDownloader.DownloadedMedia(null, java.util.List.of(photoOne, photoTwo), audioPath);
+        downloader.downloadResult = new TikTokDownloader.DownloadedMedia(null, java.util.List.of(photoOne, photoTwo), audioPath, 0, 0);
         var sender = new StubTelegramVideoSender();
         var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
 
@@ -124,7 +126,7 @@ class TelegramMessageHandlerTest {
         Files.writeString(audioPath, "audio-content");
 
         var downloader = new StubTikTokDownloader();
-        downloader.downloadResult = new TikTokDownloader.DownloadedMedia(videoPath, java.util.List.of(), audioPath);
+        downloader.downloadResult = new TikTokDownloader.DownloadedMedia(videoPath, java.util.List.of(), audioPath, 0, 0);
         var sender = new StubTelegramVideoSender();
         sender.sendAudioFailure = new TikTokDownloader.TikTokDownloadException("audio send failed");
         var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
@@ -148,7 +150,7 @@ class TelegramMessageHandlerTest {
         Files.writeString(audioPath, "audio-content");
 
         var downloader = new StubTikTokDownloader();
-        downloader.downloadResult = new TikTokDownloader.DownloadedMedia(null, java.util.List.of(photoOne, photoTwo), audioPath);
+        downloader.downloadResult = new TikTokDownloader.DownloadedMedia(null, java.util.List.of(photoOne, photoTwo), audioPath, 0, 0);
         var sender = new StubTelegramVideoSender();
         sender.sendMediaGroupFailure = new TikTokDownloader.TikTokDownloadException("media group send failed");
         var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
@@ -270,6 +272,8 @@ class TelegramMessageHandlerTest {
         private String lastChatId;
         private Path lastVideoPath;
         private String lastFileName;
+        private int lastVideoWidth;
+        private int lastVideoHeight;
         private Path lastAudioPath;
         private String lastAudioFileName;
         private java.util.List<Path> lastMediaGroupPaths;
@@ -300,11 +304,13 @@ class TelegramMessageHandlerTest {
         }
 
         @Override
-        public void sendVideo(String chatId, Path videoPath, String fileName) {
+        public void sendVideo(String chatId, Path videoPath, String fileName, int width, int height) {
             sendVideoCalls++;
             lastChatId = chatId;
             lastVideoPath = videoPath;
             lastFileName = fileName;
+            lastVideoWidth = width;
+            lastVideoHeight = height;
         }
 
         @Override

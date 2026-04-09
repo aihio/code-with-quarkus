@@ -11,9 +11,13 @@ final class TikTokVideoSelector {
     private static final Pattern URL_KEY_PATTERN = Pattern.compile("v[^_]+_(?<codec>[^_]+)_(?<resolution>\\d+p)_(?<bitrate>\\d+)");
 
     List<String> selectVideoUrls(JsonNode itemStruct) {
+        return selectVideo(itemStruct).urls();
+    }
+
+    VideoSelection selectVideo(JsonNode itemStruct) {
         var video = at(itemStruct, "video");
         if (!video.isObject()) {
-            return List.of();
+            return new VideoSelection(List.of(), 0, 0);
         }
 
         var hasWatermark = booleanValue(video);
@@ -60,11 +64,15 @@ final class TikTokVideoSelector {
             }
         }
 
-        return candidates.values().stream()
+        var sorted = candidates.values().stream()
                 .sorted(candidateComparator().reversed())
-                .map(VideoCandidate::url)
-                .distinct()
                 .toList();
+
+        var topWidth = sorted.isEmpty() ? 0 : sorted.getFirst().width();
+        var topHeight = sorted.isEmpty() ? 0 : sorted.getFirst().height();
+        var urls = sorted.stream().map(VideoCandidate::url).distinct().toList();
+
+        return new VideoSelection(urls, topWidth, topHeight);
     }
 
     private void addAddressCandidates(Map<String, VideoCandidate> candidates, JsonNode address, boolean noWatermark,
@@ -335,6 +343,9 @@ final class TikTokVideoSelector {
     }
 
     private record UrlKeyMetadata(String codec, String resolution, int bitrate, int qualityRank) {
+    }
+
+    record VideoSelection(List<String> urls, int width, int height) {
     }
 
     private static final class MissingJsonNodeHolder {
