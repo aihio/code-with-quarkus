@@ -14,6 +14,8 @@ dependencies {
     implementation 'io.quarkus:quarkus-jackson'
     implementation 'org.apache.camel.quarkus:camel-quarkus-telegram'
     implementation 'io.quarkus:quarkus-arc'
+    implementation 'io.quarkus:quarkus-agroal'
+    implementation 'io.quarkiverse.jdbc:quarkus-jdbc-sqlite4j:0.0.8'
     testImplementation 'io.quarkus:quarkus-junit'
 }
 

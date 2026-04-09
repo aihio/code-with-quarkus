@@ -65,7 +65,44 @@ public class TelegramVideoSender {
         }
     }
 
-    public void sendVideo(String chatId, Path videoPath, String fileName, int width, int height) {
+    public TelegramVideoResponse sendVideoByUrl(String chatId, String videoUrl, int width, int height) {
+        var payloadBuilder = new java.util.HashMap<String, Object>();
+        payloadBuilder.put("chat_id", chatId);
+        payloadBuilder.put("video", videoUrl);
+        payloadBuilder.put("supports_streaming", true);
+        if (width > 0 && height > 0) {
+            payloadBuilder.put("width", width);
+            payloadBuilder.put("height", height);
+        }
+
+        var json = postJson("sendVideo", payloadBuilder);
+        var result = json.path("result");
+        var messageId = result.path("message_id");
+        var video = result.path("video");
+        var fileId = video.path("file_id");
+
+        return new TelegramVideoResponse(
+                messageId.isIntegralNumber() ? messageId.asLong() : null,
+                fileId.isTextual() ? fileId.asText() : null
+        );
+    }
+
+    public TelegramVideoResponse sendVideoByFileId(String chatId, String fileId) {
+        var payload = Map.of("chat_id", chatId, "video", fileId);
+
+        var json = postJson("sendVideo", payload);
+        var result = json.path("result");
+        var messageId = result.path("message_id");
+        var videoNode = result.path("video");
+        var returnedFileId = videoNode.path("file_id");
+
+        return new TelegramVideoResponse(
+                messageId.isIntegralNumber() ? messageId.asLong() : null,
+                returnedFileId.isTextual() ? returnedFileId.asText() : fileId
+        );
+    }
+
+    public TelegramVideoResponse sendVideo(String chatId, Path videoPath, String fileName, int width, int height) {
         var parts = new ArrayList<MultipartPart>();
         parts.add(new FieldPart("chat_id", chatId));
         parts.add(new FieldPart("supports_streaming", "true"));
@@ -74,34 +111,61 @@ public class TelegramVideoSender {
             parts.add(new FieldPart("height", String.valueOf(height)));
         }
         parts.add(new FilePart("video", fileName, "video/mp4", videoPath));
-        uploadMultipart("sendVideo", parts);
+
+        var json = uploadMultipart("sendVideo", parts);
+        var result = json.path("result");
+        var messageId = result.path("message_id");
+        var fileId = result.path("video").path("file_id");
+
+        return new TelegramVideoResponse(
+                messageId.isIntegralNumber() ? messageId.asLong() : null,
+                fileId.isTextual() ? fileId.asText() : null
+        );
     }
 
-    public void sendAudio(String chatId, Path audioPath, String fileName) {
-        uploadMultipart("sendAudio", List.of(
+    public String sendAudio(String chatId, Path audioPath, String fileName) {
+        var json = uploadMultipart("sendAudio", List.of(
                 new FieldPart("chat_id", chatId),
                 new FilePart("audio", fileName, "audio/mpeg", audioPath)
         ));
+        var fileId = json.path("result").path("audio").path("file_id");
+        return fileId.isTextual() ? fileId.asText() : null;
     }
 
-    public void sendMediaGroup(String chatId, List<Path> photoPaths) {
+    public void sendAudioByFileId(String chatId, String fileId) {
+        postJson("sendAudio", Map.of("chat_id", chatId, "audio", fileId));
+    }
+
+    public List<String> sendMediaGroup(String chatId, List<Path> photoPaths) {
         if (photoPaths == null || photoPaths.isEmpty()) {
-            return;
+            return List.of();
         }
 
         if (photoPaths.size() == 1) {
             var photoPath = photoPaths.getFirst();
-            sendPhoto(chatId, photoPath, photoPath.getFileName().toString());
-            return;
+            var fileId = sendPhoto(chatId, photoPath, photoPath.getFileName().toString());
+            return fileId != null ? List.of(fileId) : List.of();
         }
 
+        var allFileIds = new ArrayList<String>();
         for (var start = 0; start < photoPaths.size(); start += TELEGRAM_MEDIA_GROUP_MAX) {
             var endExclusive = Math.min(start + TELEGRAM_MEDIA_GROUP_MAX, photoPaths.size());
-            sendMediaGroupChunk(chatId, photoPaths.subList(start, endExclusive));
+            allFileIds.addAll(sendMediaGroupChunk(chatId, photoPaths.subList(start, endExclusive)));
         }
+        return allFileIds;
     }
 
-    private void sendMediaGroupChunk(String chatId, List<Path> photoPaths) {
+    public void sendMediaGroupByFileIds(String chatId, List<String> fileIds) {
+        var media = fileIds.stream()
+                .map(fid -> Map.of("type", "photo", "media", fid))
+                .toList();
+        var payload = new java.util.HashMap<String, Object>();
+        payload.put("chat_id", chatId);
+        payload.put("media", media);
+        postJson("sendMediaGroup", payload);
+    }
+
+    private List<String> sendMediaGroupChunk(String chatId, List<Path> photoPaths) {
         var media = new ArrayList<Map<String, String>>();
         var parts = new ArrayList<MultipartPart>();
         parts.add(new FieldPart("chat_id", chatId));
@@ -115,17 +179,38 @@ public class TelegramVideoSender {
 
         try {
             parts.add(1, new FieldPart("media", objectMapper.writeValueAsString(media)));
-            uploadMultipart("sendMediaGroup", parts);
+            var json = uploadMultipart("sendMediaGroup", parts);
+            // result is an array of messages; extract highest-quality file_id from each photo
+            var result = json.path("result");
+            var fileIds = new ArrayList<String>();
+            if (result.isArray()) {
+                for (var message : result) {
+                    var photoArray = message.path("photo");
+                    if (photoArray.isArray() && !photoArray.isEmpty()) {
+                        var fileId = photoArray.get(photoArray.size() - 1).path("file_id");
+                        if (fileId.isTextual()) {
+                            fileIds.add(fileId.asText());
+                        }
+                    }
+                }
+            }
+            return fileIds;
         } catch (IOException e) {
             throw new TikTokDownloader.TikTokDownloadException("Telegram sendMediaGroup failed: " + e.getMessage(), e);
         }
     }
 
-    private void sendPhoto(String chatId, Path photoPath, String fileName) {
-        uploadMultipart("sendPhoto", List.of(
+    private String sendPhoto(String chatId, Path photoPath, String fileName) {
+        var json = uploadMultipart("sendPhoto", List.of(
                 new FieldPart("chat_id", chatId),
                 new FilePart("photo", fileName, contentTypeFor(photoPath), photoPath)
         ));
+        var photoArray = json.path("result").path("photo");
+        if (photoArray.isArray() && !photoArray.isEmpty()) {
+            var fileId = photoArray.get(photoArray.size() - 1).path("file_id");
+            return fileId.isTextual() ? fileId.asText() : null;
+        }
+        return null;
     }
 
     private String contentTypeFor(Path path) {
@@ -152,14 +237,14 @@ public class TelegramVideoSender {
         }
     }
 
-    private void uploadMultipart(String method, List<MultipartPart> requestParts) {
+    private com.fasterxml.jackson.databind.JsonNode uploadMultipart(String method, List<MultipartPart> requestParts) {
         var boundary = newBoundary();
         var request = HttpRequest.newBuilder(methodUri(method))
                 .header("Content-Type", "multipart/form-data; boundary=" + boundary)
                 .POST(multipartBody(boundary, requestParts))
                 .build();
 
-        sendTelegramRequest(method, request);
+        return sendTelegramRequest(method, request);
     }
 
     private com.fasterxml.jackson.databind.JsonNode sendTelegramRequest(String method, HttpRequest request) {
@@ -233,5 +318,11 @@ public class TelegramVideoSender {
                     + "Content-Disposition: form-data; name=\"" + name + "\"; filename=\"" + fileName + "\"\r\n"
                     + "Content-Type: " + contentType + "\r\n\r\n";
         }
+    }
+
+    public record TelegramVideoResponse(
+            Long messageId,
+            String fileId
+    ) {
     }
 }

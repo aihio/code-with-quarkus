@@ -60,19 +60,52 @@ public class TikTokDownloader {
         return downloadVideo(itemStruct);
     }
 
-    public DownloadedMedia downloadMedia(String url) {
+    public ResolvedMedia resolveMedia(String url) {
         var postContext = resolvePostContext(url);
         var itemStruct = extractItemStructWithEmbedFallback(
                 postContext.pageBody(),
                 postContext.videoId(),
                 postContext.photoRoute());
-        var audioPath = downloadAudio(itemStruct);
-        var photoUrls = mediaUrlExtractor.selectPhotoUrls(itemStruct);
-        var photoPaths = new ArrayList<Path>();
 
+        var photoUrls = mediaUrlExtractor.selectPhotoUrls(itemStruct);
         if (!photoUrls.isEmpty()) {
+            return new ResolvedMedia(
+                    postContext.videoId(),
+                    true,  // isGallery
+                    List.of(),
+                    mediaUrlExtractor.selectAudioUrls(itemStruct),
+                    photoUrls,
+                    0,
+                    0
+            );
+        }
+
+        var videoSelection = videoSelector.selectVideo(itemStruct);
+        return new ResolvedMedia(
+                postContext.videoId(),
+                false,  // not gallery
+                videoSelection.urls(),
+                mediaUrlExtractor.selectAudioUrls(itemStruct),
+                List.of(),
+                videoSelection.width(),
+                videoSelection.height()
+        );
+    }
+
+    public DownloadedMedia downloadMedia(String url) {
+        var resolved = resolveMedia(url);
+
+        var audioPath = downloadFromCandidates(
+                resolved.audioUrlCandidates(),
+                "download TikTok audio",
+                AUDIO_SUFFIX,
+                "Extraction failure: unable to find TikTok audio track"
+        );
+
+        var photoPaths = new ArrayList<Path>();
+        if (!resolved.photoUrls().isEmpty()) {
             try {
-                for (var photoUrl : photoUrls) {
+                for (var photoUrl : resolved.photoUrls()) {
                     var photoPath = withRetries("download TikTok gallery image",
                             () -> transport.downloadToTemp(URI.create(photoUrl), downloadHeaders(), PHOTO_SUFFIX));
                     photoPaths.add(photoPath);
@@ -85,15 +118,27 @@ public class TikTokDownloader {
             }
         }
 
-        var videoSelection = videoSelector.selectVideo(itemStruct);
         try {
-            var videoPath = downloadFromCandidates(videoSelection.urls(), "download TikTok video", VIDEO_SUFFIX,
-                    "Extraction failure: unable to find a playable TikTok video URL");
-            return new DownloadedMedia(videoPath, List.of(), audioPath, videoSelection.width(), videoSelection.height());
+            var videoPath = downloadFromCandidates(
+                    resolved.videoUrlCandidates(),
+                    "download TikTok video",
+                    VIDEO_SUFFIX,
+                    "Extraction failure: unable to find a playable TikTok video URL"
+            );
+            return new DownloadedMedia(videoPath, List.of(), audioPath, resolved.videoWidth(), resolved.videoHeight());
         } catch (RuntimeException e) {
             deleteQuietly(audioPath);
             throw e;
         }
+    }
+
+    public Path downloadAudioFromUrls(List<String> audioUrlCandidates) {
+        return downloadFromCandidates(
+                audioUrlCandidates,
+                "download TikTok audio",
+                AUDIO_SUFFIX,
+                "Extraction failure: unable to find TikTok audio track"
+        );
     }
 
     private PostContext resolvePostContext(String url) {
@@ -123,7 +168,7 @@ public class TikTokDownloader {
         );
     }
 
-    private Path downloadFromCandidates(List<String> urls, String action, String suffix, String noCandidatesMessage) {
+    Path downloadFromCandidates(List<String> urls, String action, String suffix, String noCandidatesMessage) {
         if (urls.isEmpty()) {
             throw new TikTokDownloadException(noCandidatesMessage);
         }
@@ -290,6 +335,22 @@ public class TikTokDownloader {
     }
 
     public record Response<T>(URI uri, int statusCode, T body) {
+    }
+
+    public record ResolvedMedia(
+            String tiktokPostId,
+            boolean isGallery,
+            List<String> videoUrlCandidates,
+            List<String> audioUrlCandidates,
+            List<String> photoUrls,
+            int videoWidth,
+            int videoHeight
+    ) {
+        public ResolvedMedia {
+            videoUrlCandidates = videoUrlCandidates == null ? List.of() : List.copyOf(videoUrlCandidates);
+            audioUrlCandidates = audioUrlCandidates == null ? List.of() : List.copyOf(audioUrlCandidates);
+            photoUrls = photoUrls == null ? List.of() : List.copyOf(photoUrls);
+        }
     }
 
     public record DownloadedMedia(Path videoPath, List<Path> photoPaths, Path audioPath, int videoWidth,

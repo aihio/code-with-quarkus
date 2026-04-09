@@ -1,6 +1,8 @@
 package io.github.aihio.bot;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.aihio.bot.cache.CachedMedia;
+import io.github.aihio.bot.cache.FileIdCache;
 import io.github.aihio.bot.tiktok.TikTokDownloader;
 import org.apache.camel.component.telegram.TelegramConstants;
 import org.apache.camel.component.telegram.model.IncomingMessage;
@@ -15,6 +17,7 @@ import java.net.http.HttpClient;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -27,7 +30,8 @@ class TelegramMessageHandlerTest {
     void handlesStartCommandBeforeAnyOtherFlow() {
         var downloader = new StubTikTokDownloader();
         var sender = new StubTelegramVideoSender();
-        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
+        var cache = new StubTikTokFileIdCache();
+        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler, cache);
 
         var reply = handler.handle(incomingMessage("/start"), "123");
 
@@ -39,7 +43,7 @@ class TelegramMessageHandlerTest {
     @Test
     void returnsGuidanceForNonTikTokMessages() {
         var handler = new TelegramMessageHandler(new StubTikTokDownloader(), defaultMessageHandler,
-                new StubTelegramVideoSender(), startCommandMessageHandler);
+                new StubTelegramVideoSender(), startCommandMessageHandler, new StubTikTokFileIdCache());
 
         var reply = handler.handle(incomingMessage("hello"), "123");
 
@@ -49,7 +53,7 @@ class TelegramMessageHandlerTest {
     @Test
     void returnsGuidanceWhenChatIdIsMissingForTikTokUrl() {
         var handler = new TelegramMessageHandler(new StubTikTokDownloader(), defaultMessageHandler,
-                new StubTelegramVideoSender(), startCommandMessageHandler);
+                new StubTelegramVideoSender(), startCommandMessageHandler, new StubTikTokFileIdCache());
 
         var reply = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), " ");
 
@@ -68,7 +72,8 @@ class TelegramMessageHandlerTest {
         downloader.downloadResult = new TikTokDownloader.DownloadedMedia(videoPath, java.util.List.of(), audioPath, 720, 1280);
         var sender = new StubTelegramVideoSender();
         sender.progressMessageId = 77L;
-        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
+        var cache = new StubTikTokFileIdCache();
+        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler, cache);
 
         var result = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), "123");
 
@@ -102,7 +107,8 @@ class TelegramMessageHandlerTest {
         var downloader = new StubTikTokDownloader();
         downloader.downloadResult = new TikTokDownloader.DownloadedMedia(null, java.util.List.of(photoOne, photoTwo), audioPath, 0, 0);
         var sender = new StubTelegramVideoSender();
-        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
+        var cache = new StubTikTokFileIdCache();
+        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler, cache);
 
         var result = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), "123");
 
@@ -129,7 +135,8 @@ class TelegramMessageHandlerTest {
         downloader.downloadResult = new TikTokDownloader.DownloadedMedia(videoPath, java.util.List.of(), audioPath, 0, 0);
         var sender = new StubTelegramVideoSender();
         sender.sendAudioFailure = new TikTokDownloader.TikTokDownloadException("audio send failed");
-        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
+        var cache = new StubTikTokFileIdCache();
+        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler, cache);
 
         var reply = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), "123");
 
@@ -153,7 +160,8 @@ class TelegramMessageHandlerTest {
         downloader.downloadResult = new TikTokDownloader.DownloadedMedia(null, java.util.List.of(photoOne, photoTwo), audioPath, 0, 0);
         var sender = new StubTelegramVideoSender();
         sender.sendMediaGroupFailure = new TikTokDownloader.TikTokDownloadException("media group send failed");
-        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
+        var cache = new StubTikTokFileIdCache();
+        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler, cache);
         var processor = new MessageProcessor(handler, defaultMessageHandler, sender);
 
         var exchange = new DefaultExchange(new DefaultCamelContext());
@@ -184,7 +192,8 @@ class TelegramMessageHandlerTest {
         var downloader = new StubTikTokDownloader();
         downloader.downloadFailure = new TikTokDownloader.TikTokDownloadException("TikTok video is unavailable (statusCode=100002)");
         var sender = new StubTelegramVideoSender();
-        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
+        var cache = new StubTikTokFileIdCache();
+        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler, cache);
 
         var reply = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), "123");
 
@@ -199,7 +208,8 @@ class TelegramMessageHandlerTest {
         var downloader = new StubTikTokDownloader();
         downloader.downloadFailure = new TikTokDownloader.TikTokDownloadException("Extraction failure: unable to find a playable TikTok video URL");
         var sender = new StubTelegramVideoSender();
-        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
+        var cache = new StubTikTokFileIdCache();
+        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler, cache);
 
         var reply = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), "123");
 
@@ -212,7 +222,8 @@ class TelegramMessageHandlerTest {
         var downloader = new StubTikTokDownloader();
         downloader.downloadFailure = new TikTokDownloader.TikTokDownloadException("Invalid URL: expected a tiktok.com URL");
         var sender = new StubTelegramVideoSender();
-        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
+        var cache = new StubTikTokFileIdCache();
+        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler, cache);
 
         var reply = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/invalid"), "123");
 
@@ -225,7 +236,8 @@ class TelegramMessageHandlerTest {
         var downloader = new StubTikTokDownloader();
         downloader.downloadFailure = new TikTokDownloader.TikTokDownloadException("Some unexpected error occurred");
         var sender = new StubTelegramVideoSender();
-        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
+        var cache = new StubTikTokFileIdCache();
+        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler, cache);
 
         var reply = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), "123");
 
@@ -255,12 +267,37 @@ class TelegramMessageHandlerTest {
         }
 
         @Override
+        public TikTokDownloader.ResolvedMedia resolveMedia(String url) {
+            lastUrl = url;
+            if (downloadFailure != null) {
+                throw downloadFailure;
+            }
+            // Return a minimal ResolvedMedia for testing
+            // For gallery posts: isGallery = true
+            // For video posts: isGallery = false, with mock video URL candidates
+            if (downloadResult != null && downloadResult.gallery()) {
+                return new TikTokDownloader.ResolvedMedia("123", true, java.util.List.of(), java.util.List.of(),
+                        downloadResult.photoPaths().stream().map(Path::toString).toList(), 0, 0);
+            }
+            return new TikTokDownloader.ResolvedMedia("123", false, java.util.List.of("https://example.com/video.mp4"),
+                    java.util.List.of(), java.util.List.of(), 720, 1280);
+        }
+
+        @Override
         public DownloadedMedia downloadMedia(String url) {
             lastUrl = url;
             if (downloadFailure != null) {
                 throw downloadFailure;
             }
             return downloadResult;
+        }
+
+        @Override
+        public Path downloadAudioFromUrls(java.util.List<String> audioUrlCandidates) {
+            if (downloadFailure != null) {
+                throw downloadFailure;
+            }
+            return downloadResult != null ? downloadResult.audioPath() : null;
         }
     }
 
@@ -304,17 +341,32 @@ class TelegramMessageHandlerTest {
         }
 
         @Override
-        public void sendVideo(String chatId, Path videoPath, String fileName, int width, int height) {
+        public TelegramVideoSender.TelegramVideoResponse sendVideoByUrl(String chatId, String videoUrl, int width, int height) {
+            sendVideoCalls++;
+            // Stub always throws to trigger fallback to download/upload (Phase 3 testing)
+            throw new TikTokDownloader.TikTokDownloadException("URL send not available in test");
+        }
+
+        @Override
+        public TelegramVideoSender.TelegramVideoResponse sendVideoByFileId(String chatId, String fileId) {
+            sendVideoCalls++;
+            // Stub always throws to trigger fallback to download/upload (Phase 3 testing)
+            throw new TikTokDownloader.TikTokDownloadException("File ID send not available in test");
+        }
+
+        @Override
+        public TelegramVideoSender.TelegramVideoResponse sendVideo(String chatId, Path videoPath, String fileName, int width, int height) {
             sendVideoCalls++;
             lastChatId = chatId;
             lastVideoPath = videoPath;
             lastFileName = fileName;
             lastVideoWidth = width;
             lastVideoHeight = height;
+            return new TelegramVideoSender.TelegramVideoResponse(null, null);
         }
 
         @Override
-        public void sendAudio(String chatId, Path audioPath, String fileName) {
+        public String sendAudio(String chatId, Path audioPath, String fileName) {
             sendAudioCalls++;
             if (sendAudioFailure != null) {
                 throw sendAudioFailure;
@@ -322,16 +374,28 @@ class TelegramMessageHandlerTest {
             lastChatId = chatId;
             lastAudioPath = audioPath;
             lastAudioFileName = fileName;
+            return null;  // no file_id in stub
         }
 
         @Override
-        public void sendMediaGroup(String chatId, java.util.List<Path> photoPaths) {
+        public void sendAudioByFileId(String chatId, String fileId) {
+            // no-op in stub
+        }
+
+        @Override
+        public java.util.List<String> sendMediaGroup(String chatId, java.util.List<Path> photoPaths) {
             sendMediaGroupCalls++;
             if (sendMediaGroupFailure != null) {
                 throw sendMediaGroupFailure;
             }
             lastChatId = chatId;
             lastMediaGroupPaths = java.util.List.copyOf(photoPaths);
+            return java.util.List.of();  // no file_ids in stub
+        }
+
+        @Override
+        public void sendMediaGroupByFileIds(String chatId, java.util.List<String> fileIds) {
+            // no-op in stub
         }
     }
 
@@ -344,6 +408,26 @@ class TelegramMessageHandlerTest {
         @Override
         public Path downloadToTemp(URI uri, java.util.Map<String, String> headers, String suffix) {
             throw new UnsupportedOperationException();
+        }
+    }
+
+    private static final class StubTikTokFileIdCache implements FileIdCache {
+        public StubTikTokFileIdCache() {
+        }
+
+        @Override
+        public Optional<CachedMedia> getCachedMedia(String tiktokPostId) {
+            return Optional.empty();  // always cache miss in tests
+        }
+
+        @Override
+        public void cacheMedia(String tiktokPostId, CachedMedia media) {
+            // no-op in tests
+        }
+
+        @Override
+        public void invalidateCachedMedia(String tiktokPostId) {
+            // no-op in tests
         }
     }
 }
