@@ -40,10 +40,12 @@ public class MessageProcessor extends RouteBuilder {
                 .process(exchange -> {
                     var failure = exchange.getProperty(Exchange.EXCEPTION_CAUGHT, Throwable.class);
                     if (failure != null) {
-                        LOG.warn("TikTok processing failed", failure);
+                        LOG.warn("TikTok processing failed: " + failure.getMessage());
+                        var responseMessage = mapExceptionToUserMessage((TikTokDownloader.TikTokDownloadException) failure);
+                        exchange.getIn().setBody(responseMessage);
+                    } else {
+                        exchange.getIn().setBody(defaultMessageHandler.handleProcessingError());
                     }
-                    exchange.getIn().setBody(
-                            defaultMessageHandler.handle("Failed to process this TikTok link. Please try another link."));
                 });
 
         onCompletion()
@@ -58,6 +60,31 @@ public class MessageProcessor extends RouteBuilder {
                 })
                 .filter(body().isNotNull())
                 .to(TELEGRAM_PRODUCER_URI);
+    }
+
+    private Object mapExceptionToUserMessage(TikTokDownloader.TikTokDownloadException exception) {
+        var message = exception.getMessage();
+        if (message == null) {
+            return defaultMessageHandler.handleProcessingError();
+        }
+
+        // Handle unavailable videos
+        if (message.contains("unavailable") || message.contains("statusCode")) {
+            return defaultMessageHandler.handleUnavailableVideo();
+        }
+
+        // Handle invalid URLs
+        if (message.contains("Invalid URL")) {
+            return defaultMessageHandler.handleInvalidUrl();
+        }
+
+        // Handle extraction failures
+        if (message.contains("Extraction failure")) {
+            return defaultMessageHandler.handleUnavailableVideo();
+        }
+
+        // Default fallback for any other error
+        return defaultMessageHandler.handleProcessingError();
     }
 
     void cleanupExchangeArtifacts(Exchange exchange) {

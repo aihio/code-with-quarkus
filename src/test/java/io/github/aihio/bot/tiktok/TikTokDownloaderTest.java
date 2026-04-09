@@ -164,9 +164,7 @@ class TikTokDownloaderTest {
         var downloader = downloader(transport, 0);
         var media = downloader.downloadMedia("https://www.tiktok.com/@demo/video/3213213213213213213");
         createdFiles.add(media.audioPath());
-        for (var photoPath : media.photoPaths()) {
-            createdFiles.add(photoPath);
-        }
+        createdFiles.addAll(media.photoPaths());
 
         assertTrue(media.gallery());
         assertNull(media.videoPath());
@@ -211,14 +209,12 @@ class TikTokDownloaderTest {
         var downloader = downloader(transport, 0);
         var media = downloader.downloadMedia("https://www.tiktok.com/@demo/video/6546546546546546546");
         createdFiles.add(media.audioPath());
-        for (var photoPath : media.photoPaths()) {
-            createdFiles.add(photoPath);
-        }
+        createdFiles.addAll(media.photoPaths());
 
         assertTrue(media.gallery());
         assertEquals(1, media.photoPaths().size());
         assertEquals("gallery-alt-audio", Files.readString(media.audioPath()));
-        assertEquals("gallery-alt-photo", Files.readString(media.photoPaths().get(0)));
+        assertEquals("gallery-alt-photo", Files.readString(media.photoPaths().getFirst()));
     }
 
     @Test
@@ -928,9 +924,7 @@ class TikTokDownloaderTest {
         var downloader = downloader(transport, 0);
         var media = downloader.downloadMedia("https://www.tiktok.com/@demo/photo/7615375482187435272");
         createdFiles.add(media.audioPath());
-        for (var photoPath : media.photoPaths()) {
-            createdFiles.add(photoPath);
-        }
+        createdFiles.addAll(media.photoPaths());
 
         assertTrue(media.gallery());
         assertNull(media.videoPath());

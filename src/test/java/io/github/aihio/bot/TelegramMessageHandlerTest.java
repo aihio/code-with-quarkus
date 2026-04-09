@@ -37,13 +37,13 @@ class TelegramMessageHandlerTest {
     }
 
     @Test
-    void echoesNonTikTokMessages() {
+    void returnsGuidanceForNonTikTokMessages() {
         var handler = new TelegramMessageHandler(new StubTikTokDownloader(), defaultMessageHandler,
                 new StubTelegramVideoSender(), startCommandMessageHandler);
 
         var reply = handler.handle(incomingMessage("hello"), "123");
 
-        assertEquals("hello", ((org.apache.camel.component.telegram.model.OutgoingTextMessage) reply).getText());
+        assertEquals("Please send a TikTok URL.", ((org.apache.camel.component.telegram.model.OutgoingTextMessage) reply).getText());
     }
 
     @Test
@@ -53,7 +53,7 @@ class TelegramMessageHandlerTest {
 
         var reply = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), " ");
 
-        assertEquals("Unable to detect Telegram chat id for this message.",
+        assertEquals("Please send a TikTok URL.",
                 ((org.apache.camel.component.telegram.model.OutgoingTextMessage) reply).getText());
     }
 
@@ -139,7 +139,7 @@ class TelegramMessageHandlerTest {
     }
 
     @Test
-    void routeOwnedCleanupDeletesFilesWhenSendMediaGroupFails() throws IOException {
+    void returnsErrorMessageWhenSendingMediaGroupFails() throws IOException {
         var photoOne = Files.createTempFile("telegram-handler-route-fail-", ".jpg");
         var photoTwo = Files.createTempFile("telegram-handler-route-fail-", ".jpg");
         var audioPath = Files.createTempFile("telegram-handler-route-fail-", ".mp3");
@@ -157,19 +157,78 @@ class TelegramMessageHandlerTest {
         var exchange = new DefaultExchange(new DefaultCamelContext());
         exchange.getIn().setHeader(TelegramConstants.TELEGRAM_CHAT_ID, "123");
 
-        assertThrows(TikTokDownloader.TikTokDownloadException.class,
-                () -> handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), "123", exchange));
+        var reply = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), "123", exchange);
 
+        // Files should still exist because they are managed by the route
         assertTrue(Files.exists(photoOne));
         assertTrue(Files.exists(photoTwo));
         assertTrue(Files.exists(audioPath));
 
+        // The processor should clean them up
         processor.cleanupExchangeArtifacts(exchange);
 
         assertTrue(Files.notExists(photoOne));
         assertTrue(Files.notExists(photoTwo));
         assertTrue(Files.notExists(audioPath));
         assertEquals(1, sender.deleteCalls);
+
+        // Verify error message was returned
+        assertEquals("Failed to process this TikTok link. Please try another link.",
+                ((org.apache.camel.component.telegram.model.OutgoingTextMessage) reply).getText());
+    }
+
+    @Test
+    void returnsUnavailableMessageWhenVideoUnavailable() {
+        var downloader = new StubTikTokDownloader();
+        downloader.downloadFailure = new TikTokDownloader.TikTokDownloadException("TikTok video is unavailable (statusCode=100002)");
+        var sender = new StubTelegramVideoSender();
+        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
+
+        var reply = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), "123");
+
+        assertEquals("The TikTok video is unavailable or has been deleted. Please try another link.",
+                ((org.apache.camel.component.telegram.model.OutgoingTextMessage) reply).getText());
+        assertEquals(0, sender.sendVideoCalls);
+        assertEquals(1, sender.sendTextCalls);
+    }
+
+    @Test
+    void returnsUnavailableMessageWhenExtractionFails() {
+        var downloader = new StubTikTokDownloader();
+        downloader.downloadFailure = new TikTokDownloader.TikTokDownloadException("Extraction failure: unable to find a playable TikTok video URL");
+        var sender = new StubTelegramVideoSender();
+        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
+
+        var reply = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), "123");
+
+        assertEquals("The TikTok video is unavailable or has been deleted. Please try another link.",
+                ((org.apache.camel.component.telegram.model.OutgoingTextMessage) reply).getText());
+    }
+
+    @Test
+    void returnsInvalidUrlMessageWhenInvalidUrlErrorThrown() {
+        var downloader = new StubTikTokDownloader();
+        downloader.downloadFailure = new TikTokDownloader.TikTokDownloadException("Invalid URL: expected a tiktok.com URL");
+        var sender = new StubTelegramVideoSender();
+        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
+
+        var reply = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/invalid"), "123");
+
+        assertEquals("The link you provided is invalid. Please share a valid TikTok URL.",
+                ((org.apache.camel.component.telegram.model.OutgoingTextMessage) reply).getText());
+    }
+
+    @Test
+    void returnsProcessingErrorMessageWhenGenericErrorOccurs() {
+        var downloader = new StubTikTokDownloader();
+        downloader.downloadFailure = new TikTokDownloader.TikTokDownloadException("Some unexpected error occurred");
+        var sender = new StubTelegramVideoSender();
+        var handler = new TelegramMessageHandler(downloader, defaultMessageHandler, sender, startCommandMessageHandler);
+
+        var reply = handler.handle(incomingMessage("https://www.tiktok.com/@demo/video/123"), "123");
+
+        assertEquals("Failed to process this TikTok link. Please try another link.",
+                ((org.apache.camel.component.telegram.model.OutgoingTextMessage) reply).getText());
     }
 
     private IncomingMessage incomingMessage(String text) {
@@ -185,6 +244,7 @@ class TelegramMessageHandlerTest {
     private static final class StubTikTokDownloader extends TikTokDownloader {
         private String lastUrl;
         private DownloadedMedia downloadResult;
+        private RuntimeException downloadFailure;
 
         private StubTikTokDownloader() {
             super(new ObjectMapper(),
@@ -195,6 +255,9 @@ class TelegramMessageHandlerTest {
         @Override
         public DownloadedMedia downloadMedia(String url) {
             lastUrl = url;
+            if (downloadFailure != null) {
+                throw downloadFailure;
+            }
             return downloadResult;
         }
     }

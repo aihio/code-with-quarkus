@@ -68,10 +68,7 @@ public class TelegramMessageHandler {
             // Media was already sent directly, so skip producer route output for this exchange.
             return null;
         } catch (TikTokDownloader.TikTokDownloadException e) {
-            if (exchange != null) {
-                throw e;
-            }
-            return defaultMessageHandler.handle("Failed to process this TikTok link. Please try another link.");
+            return mapExceptionToUserMessage(e);
         } finally {
             if (exchange == null) {
                 cleanupDownloadedPaths(downloadedPaths);
@@ -82,12 +79,37 @@ public class TelegramMessageHandler {
 
     private Object validateTikTokInput(String incoming, String chatId) {
         if (!isValidTikTokUrl(incoming)) {
-            return defaultMessageHandler.handle(incoming);
+            return defaultMessageHandler.handle();
         }
         if (chatId == null || chatId.isBlank()) {
-            return defaultMessageHandler.handle("Unable to detect Telegram chat id for this message.");
+            return defaultMessageHandler.handle();
         }
         return null;
+    }
+
+    private Object mapExceptionToUserMessage(TikTokDownloader.TikTokDownloadException exception) {
+        var message = exception.getMessage();
+        if (message == null) {
+            return defaultMessageHandler.handleProcessingError();
+        }
+
+        // Handle unavailable videos
+        if (message.contains("unavailable") || message.contains("statusCode")) {
+            return defaultMessageHandler.handleUnavailableVideo();
+        }
+
+        // Handle invalid URLs
+        if (message.contains("Invalid URL")) {
+            return defaultMessageHandler.handleInvalidUrl();
+        }
+
+        // Handle extraction failures
+        if (message.contains("Extraction failure")) {
+            return defaultMessageHandler.handleUnavailableVideo();
+        }
+
+        // Default fallback for any other error
+        return defaultMessageHandler.handleProcessingError();
     }
 
     private void sendPrimaryMedia(String chatId, TikTokDownloader.DownloadedMedia media) {
